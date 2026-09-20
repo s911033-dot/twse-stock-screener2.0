@@ -114,7 +114,7 @@ def fetch_multi_day_inst(dates):
     return pd.DataFrame(records)
 
 # ====================================================
-# 4. 抓取多日融資融券 (MI_MARGN) 與借券賣出 (TWT93U) (快取 2 小時)
+# 4. 抓取多日融資融券與借券賣出 (快取 2 小時)
 # ====================================================
 @st.cache_data(ttl=7200)
 def fetch_multi_day_margin_and_sbl(dates):
@@ -184,19 +184,18 @@ def fetch_multi_day_margin_and_sbl(dates):
 
     return pd.DataFrame(records)
 
-# 載入開盤日大數據
-with st.spinner("同步臺灣證券交易所多日籌碼與信用交易大數據中..."):
+# 載入開盤日數據
+with st.spinner("同步臺灣證券交易所多日大數據中..."):
     trade_dates = get_recent_trading_dates(count=5)
     latest_date = trade_dates[0] if trade_dates else datetime.now().strftime("%Y%m%d")
     df_inst_all = fetch_multi_day_inst(trade_dates)
     df_margin_all = fetch_multi_day_margin_and_sbl(trade_dates)
 
-# 當日單日字典供即時查詢
 latest_margin_df = df_margin_all[df_margin_all["date"] == latest_date] if not df_margin_all.empty else pd.DataFrame()
 margin_data = {r["code"]: r.to_dict() for _, r in latest_margin_df.iterrows()} if not latest_margin_df.empty else {}
 
 # ====================================================
-# 5. 技術指標計算
+# 5. 技術指標計算輔助
 # ====================================================
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -237,6 +236,7 @@ def compute_indicators(df):
     df['Prev_RSI6'] = df['RSI_6'].shift(1)
     df['Prev_RSI12'] = df['RSI_12'].shift(1)
 
+    # 判定單日突破/金叉訊號
     df['Signal_MA20'] = (df['Prev_Close'] <= df['Prev_MA20']) & (df['Close'] > df['MA20'])
     df['Signal_MA60'] = (df['Prev_Close'] <= df['Prev_MA60']) & (df['Close'] > df['MA60'])
     df['Signal_KD'] = (df['Prev_K'] <= df['Prev_D']) & (df['K'] > df['D'])
@@ -244,7 +244,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 6. Plotly 走勢圖
+# 6. Plotly 互動式 K 線與訊號圖
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -262,7 +262,7 @@ def plot_stock_chart(ticker, title_name):
             shared_xaxes=True,
             vertical_spacing=0.05,
             row_heights=[0.7, 0.3],
-            subplot_titles=(f"{title_name} 近日 K 線走勢與買進訊號", "KD (9, 3, 3)")
+            subplot_titles=(f"{title_name} 近日走勢與買進訊號 (近3日訊號優先)", "KD (9, 3, 3)")
         )
 
         fig.add_trace(go.Candlestick(
@@ -275,6 +275,7 @@ def plot_stock_chart(ticker, title_name):
         fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA20'], mode='lines', name='20MA', line=dict(color='#FFA500', width=1.5)), row=1, col=1)
         fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA60'], mode='lines', name='60MA', line=dict(color='#8A2BE2', width=1.5)), row=1, col=1)
 
+        # 訊號三角形標註
         ma_signals = plot_df[plot_df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
@@ -312,7 +313,7 @@ def plot_stock_chart(ticker, title_name):
 tab1, tab2, tab3 = st.tabs(["🚀 全方位技術與量價選股", "📊 法人與信用交易排行 Top 20", "⚔️ 主力籌碼對作模型"])
 
 # ----------------------------------------------------
-# TAB 1: 技術與量價選股
+# TAB 1: 技術與量價選股 (已更新為近3日突破與自訂法人張數)
 # ----------------------------------------------------
 with tab1:
     st.subheader("1️⃣ 設定掃描範圍")
@@ -336,26 +337,32 @@ with tab1:
         selected_display = st.multiselect("搜尋股票 (支援中文或代碼)", options=all_stocks_df["display"].tolist(), default=all_stocks_df["display"].head(5).tolist())
         target_tickers = all_stocks_df[all_stocks_df["display"].isin(selected_display)]["ticker"].tolist()
 
-    st.subheader("2️⃣ 勾選過濾條件")
+    st.subheader("2️⃣ 勾選過濾條件 (技術指標改為近 3 日內觸發即符合)")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown("**【均線突破】**")
-        chk_ma20 = st.checkbox("突破 20 日線 (月線)", value=True)
-        chk_ma60 = st.checkbox("突破 60 日線 (季線)")
-        chk_wma30 = st.checkbox("突破 30 週均線")
+        st.markdown("**【均線突破 (近3日曾突破)】**")
+        chk_ma20 = st.checkbox("近3日突破 20 日線 (月線)", value=True)
+        chk_ma60 = st.checkbox("近3日突破 60 日線 (季線)")
+        chk_wma30 = st.checkbox("近3週突破 30 週均線")
     with col2:
-        st.markdown("**【KD / RSI 指標】**")
-        chk_daily_kd = st.checkbox("日 KD 黃金交叉", value=True)
-        chk_weekly_kd = st.checkbox("週 KD 黃金交叉")
-        chk_daily_rsi = st.checkbox("日 RSI 黃金交叉 (6穿12)")
-        chk_weekly_rsi = st.checkbox("週 RSI 黃金交叉")
+        st.markdown("**【KD / RSI 指標 (近3日/週)】**")
+        chk_daily_kd = st.checkbox("近3日 KD 黃金交叉", value=True)
+        chk_weekly_kd = st.checkbox("近3週 KD 黃金交叉")
+        chk_daily_rsi = st.checkbox("近3日 RSI 黃金交叉 (6穿12)")
+        chk_weekly_rsi = st.checkbox("近3週 RSI 黃金交叉")
     with col3:
-        st.markdown("**【量能與法人買超】**")
+        st.markdown("**【量能與法人買超門檻】**")
         chk_vol_burst = st.checkbox("今日爆量 (>5日均量)", value=True)
         vol_multiple = st.selectbox("爆量倍數", [1.5, 2.0, 3.0], index=0)
         min_vol_limit = st.number_input("今日最低成交量 (張)", value=500, step=500)
-        chk_trust_buy = st.checkbox("投信買超 (> 0 張)")
-        chk_foreign_buy = st.checkbox("外資買超 (> 0 張)")
+        
+        # 新增：法人買超張數自訂輸入框
+        st.markdown("---")
+        chk_trust_buy = st.checkbox("限制投信買超")
+        min_trust_lots = st.number_input("投信當日買超至少 (張)", value=100, step=100, disabled=not chk_trust_buy)
+        
+        chk_foreign_buy = st.checkbox("限制外資買超")
+        min_foreign_lots = st.number_input("外資當日買超至少 (張)", value=500, step=200, disabled=not chk_foreign_buy)
 
     if st.button("🚀 開始全方位篩選", use_container_width=True):
         if not target_tickers:
@@ -380,6 +387,7 @@ with tab1:
 
                     daily_df = compute_indicators(daily_df)
 
+                    # 週線重組
                     weekly_df = daily_df.resample('W-FRI').agg({
                         'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
                     }).dropna()
@@ -388,32 +396,49 @@ with tab1:
                     weekly_df['RSI_12'] = compute_rsi(weekly_df['Close'], 12)
                     weekly_df = compute_kd(weekly_df, 9)
 
+                    weekly_df['Prev_Close'] = weekly_df['Close'].shift(1)
+                    weekly_df['Prev_WMA30'] = weekly_df['WMA30'].shift(1)
+                    weekly_df['Prev_K'] = weekly_df['K'].shift(1)
+                    weekly_df['Prev_D'] = weekly_df['D'].shift(1)
+                    weekly_df['Prev_RSI6'] = weekly_df['RSI_6'].shift(1)
+                    weekly_df['Prev_RSI12'] = weekly_df['RSI_12'].shift(1)
+
+                    weekly_df['Signal_WMA30'] = (weekly_df['Prev_Close'] <= weekly_df['Prev_WMA30']) & (weekly_df['Close'] > weekly_df['WMA30'])
+                    weekly_df['Signal_W_KD'] = (weekly_df['Prev_K'] <= weekly_df['Prev_D']) & (weekly_df['K'] > weekly_df['D'])
+                    weekly_df['Signal_W_RSI'] = (weekly_df['Prev_RSI6'] <= weekly_df['Prev_RSI12']) & (weekly_df['RSI_6'] > weekly_df['RSI_12'])
+
                     d_today = daily_df.iloc[-1]
                     d_prev = daily_df.iloc[-2]
                     w_today = weekly_df.iloc[-1]
-                    w_prev = weekly_df.iloc[-2]
 
                     code = ticker.split(".")[0]
                     inst_info = today_inst_dict.get(code, {"foreign": 0, "trust": 0, "total_inst": 0})
                     today_vol_lots = d_today['Volume'] / 1000
 
+                    # 取得近 3 根日 K 與週 K
+                    recent3_daily = daily_df.tail(3)
+                    recent3_weekly = weekly_df.tail(3)
+
                     pass_filter = True
 
-                    if chk_ma20 and not d_today['Signal_MA20']: pass_filter = False
-                    if chk_ma60 and not d_today['Signal_MA60']: pass_filter = False
-                    if chk_wma30 and not (pd.notna(w_today['WMA30']) and d_today['Close'] > w_today['WMA30'] and d_prev['Close'] <= w_prev['WMA30']):
-                        pass_filter = False
+                    # 1. 均線突破 (近3日任一日有突破訊號)
+                    if chk_ma20 and not recent3_daily['Signal_MA20'].any(): pass_filter = False
+                    if chk_ma60 and not recent3_daily['Signal_MA60'].any(): pass_filter = False
+                    if chk_wma30 and not recent3_weekly['Signal_WMA30'].any(): pass_filter = False
 
-                    if chk_daily_kd and not d_today['Signal_KD']: pass_filter = False
-                    if chk_weekly_kd and not (w_prev['K'] <= w_prev['D'] and w_today['K'] > w_today['D']): pass_filter = False
-                    if chk_daily_rsi and not d_today['Signal_RSI']: pass_filter = False
-                    if chk_weekly_rsi and not (w_prev['RSI_6'] <= w_prev['RSI_12'] and w_today['RSI_6'] > w_today['RSI_12']): pass_filter = False
+                    # 2. KD / RSI (近3日/週任一日有金叉訊號)
+                    if chk_daily_kd and not recent3_daily['Signal_KD'].any(): pass_filter = False
+                    if chk_weekly_kd and not recent3_weekly['Signal_W_KD'].any(): pass_filter = False
+                    if chk_daily_rsi and not recent3_daily['Signal_RSI'].any(): pass_filter = False
+                    if chk_weekly_rsi and not recent3_weekly['Signal_W_RSI'].any(): pass_filter = False
 
+                    # 3. 量能檢查
                     if today_vol_lots < min_vol_limit: pass_filter = False
                     if chk_vol_burst and (d_today['Volume'] < (d_prev['Vol_MA5'] * vol_multiple)): pass_filter = False
 
-                    if chk_trust_buy and inst_info["trust"] <= 0: pass_filter = False
-                    if chk_foreign_buy and inst_info["foreign"] <= 0: pass_filter = False
+                    # 4. 法人自訂最低買超張數檢查
+                    if chk_trust_buy and inst_info["trust"] < min_trust_lots: pass_filter = False
+                    if chk_foreign_buy and inst_info["foreign"] < min_foreign_lots: pass_filter = False
 
                     if pass_filter:
                         match = all_stocks_df[all_stocks_df["ticker"] == ticker]
@@ -514,7 +539,6 @@ with tab2:
 with tab3:
     st.subheader("🎯 主力與散戶多空對作累計篩選 (前 20 名)")
     
-    # 新增週期選擇器
     model_period = st.radio(
         "選擇統計累積天期：",
         ["每日 (當日)", "三日累積", "每週 (五日累積)"],
