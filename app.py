@@ -81,7 +81,7 @@ def get_recent_trading_dates(count=5):
     return dates
 
 # ====================================================
-# 3. 抓取三大法人多日買賣超 (快取 2 小時)
+# 3. 抓取多日三大法人買賣超 (快取 2 小時)
 # ====================================================
 @st.cache_data(ttl=7200)
 def fetch_multi_day_inst(dates):
@@ -114,71 +114,89 @@ def fetch_multi_day_inst(dates):
     return pd.DataFrame(records)
 
 # ====================================================
-# 4. 抓取融資融券 (MI_MARGN) 與借券賣出 (TWT93U)
+# 4. 抓取多日融資融券 (MI_MARGN) 與借券賣出 (TWT93U) (快取 2 小時)
 # ====================================================
 @st.cache_data(ttl=7200)
-def fetch_margin_and_sbl(target_date):
-    margin_dict = {}
-    
-    # 融資融券
-    url_margin = f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={target_date}&selectType=ALL&response=json"
-    try:
-        res = requests.get(url_margin, headers=HEADERS, timeout=8).json()
-        tables = res.get("tables", [])
-        raw_data = []
-        for t in tables:
-            if "融資" in t.get("title", "") and "data" in t:
-                raw_data = t.get("data", [])
-                break
-        if not raw_data and "data" in res:
-            raw_data = res.get("data", [])
+def fetch_multi_day_margin_and_sbl(dates):
+    records = []
+    for d in dates:
+        day_dict = {}
+        # 融資融券
+        url_margin = f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={d}&selectType=ALL&response=json"
+        try:
+            res = requests.get(url_margin, headers=HEADERS, timeout=8).json()
+            tables = res.get("tables", [])
+            raw_data = []
+            for t in tables:
+                if "融資" in t.get("title", "") and "data" in t:
+                    raw_data = t.get("data", [])
+                    break
+            if not raw_data and "data" in res:
+                raw_data = res.get("data", [])
 
-        for row in raw_data:
-            code = str(row[0]).strip()
-            name = str(row[1]).strip()
-            if len(code) == 4 and code.isdigit():
-                def parse_val(v):
-                    try:
-                        return int(str(v).replace(",", ""))
-                    except:
-                        return 0
-                margin_dict[code] = {
-                    "name": name,
-                    "margin_buy": parse_val(row[2]),
-                    "margin_diff": parse_val(row[6]) - parse_val(row[5]),
-                    "short_sell": parse_val(row[9]),
-                    "short_diff": parse_val(row[12]) - parse_val(row[11]),
-                    "sbl_short_sell": 0
-                }
-    except Exception:
-        pass
-
-    # 借券賣出
-    url_sbl = f"https://www.twse.com.tw/rwd/zh/marginTrading/TWT93U?date={target_date}&response=json"
-    try:
-        res_sbl = requests.get(url_sbl, headers=HEADERS, timeout=8).json()
-        if res_sbl.get("stat") == "OK" and "data" in res_sbl:
-            for row in res_sbl["data"]:
+            for row in raw_data:
                 code = str(row[0]).strip()
-                if code in margin_dict:
-                    try:
-                        margin_dict[code]["sbl_short_sell"] = int(str(row[8]).replace(",", "")) // 1000
-                    except:
-                        pass
-    except Exception:
-        pass
+                name = str(row[1]).strip()
+                if len(code) == 4 and code.isdigit():
+                    def parse_val(v):
+                        try:
+                            return int(str(v).replace(",", ""))
+                        except:
+                            return 0
+                    day_dict[code] = {
+                        "date": d,
+                        "code": code,
+                        "name": name,
+                        "margin_buy": parse_val(row[2]),
+                        "margin_diff": parse_val(row[6]) - parse_val(row[5]),
+                        "short_sell": parse_val(row[9]),
+                        "short_diff": parse_val(row[12]) - parse_val(row[11]),
+                        "sbl_short_sell": 0,
+                        "sbl_diff": 0
+                    }
+        except Exception:
+            pass
 
-    return margin_dict
+        # 借券賣出
+        url_sbl = f"https://www.twse.com.tw/rwd/zh/marginTrading/TWT93U?date={d}&response=json"
+        try:
+            res_sbl = requests.get(url_sbl, headers=HEADERS, timeout=8).json()
+            if res_sbl.get("stat") == "OK" and "data" in res_sbl:
+                for row in res_sbl["data"]:
+                    code = str(row[0]).strip()
+                    if code in day_dict:
+                        try:
+                            def parse_sbl(v):
+                                return int(str(v).replace(",", "")) // 1000
+                            prev_bal = parse_sbl(row[7])
+                            today_sell = parse_sbl(row[8])
+                            today_return = parse_sbl(row[10]) if len(row) > 10 else 0
+                            today_bal = parse_sbl(row[12]) if len(row) > 12 else (prev_bal + today_sell - today_return)
+                            
+                            day_dict[code]["sbl_short_sell"] = today_sell
+                            day_dict[code]["sbl_diff"] = today_bal - prev_bal
+                        except:
+                            pass
+        except Exception:
+            pass
 
-# 載入近 5 個開盤日基礎數據
-with st.spinner("同步臺灣證券交易所官方最新數據中..."):
+        records.extend(list(day_dict.values()))
+
+    return pd.DataFrame(records)
+
+# 載入開盤日大數據
+with st.spinner("同步臺灣證券交易所多日籌碼與信用交易大數據中..."):
     trade_dates = get_recent_trading_dates(count=5)
     latest_date = trade_dates[0] if trade_dates else datetime.now().strftime("%Y%m%d")
     df_inst_all = fetch_multi_day_inst(trade_dates)
-    margin_data = fetch_margin_and_sbl(latest_date)
+    df_margin_all = fetch_multi_day_margin_and_sbl(trade_dates)
+
+# 當日單日字典供即時查詢
+latest_margin_df = df_margin_all[df_margin_all["date"] == latest_date] if not df_margin_all.empty else pd.DataFrame()
+margin_data = {r["code"]: r.to_dict() for _, r in latest_margin_df.iterrows()} if not latest_margin_df.empty else {}
 
 # ====================================================
-# 5. 技術指標計算輔助函數
+# 5. 技術指標計算
 # ====================================================
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -226,7 +244,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 6. Plotly 互動式 K 線與訊號圖
+# 6. Plotly 走勢圖
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -247,47 +265,30 @@ def plot_stock_chart(ticker, title_name):
             subplot_titles=(f"{title_name} 近日 K 線走勢與買進訊號", "KD (9, 3, 3)")
         )
 
-        # K 線
         fig.add_trace(go.Candlestick(
             x=plot_df.index.strftime('%Y-%m-%d'),
             open=plot_df['Open'], high=plot_df['High'],
             low=plot_df['Low'], close=plot_df['Close'],
-            name="K線",
-            increasing_line_color='#FF4B4B',
-            decreasing_line_color='#00873E'
+            name="K線", increasing_line_color='#FF4B4B', decreasing_line_color='#00873E'
         ), row=1, col=1)
 
-        # 均線
-        fig.add_trace(go.Scatter(
-            x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA20'],
-            mode='lines', name='20MA (月線)', line=dict(color='#FFA500', width=1.5)
-        ), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA20'], mode='lines', name='20MA', line=dict(color='#FFA500', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA60'], mode='lines', name='60MA', line=dict(color='#8A2BE2', width=1.5)), row=1, col=1)
 
-        fig.add_trace(go.Scatter(
-            x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA60'],
-            mode='lines', name='60MA (季線)', line=dict(color='#8A2BE2', width=1.5)
-        ), row=1, col=1)
-
-        # 訊號三角形標註
         ma_signals = plot_df[plot_df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
-                x=ma_signals.index.strftime('%Y-%m-%d'),
-                y=ma_signals['Low'] * 0.985,
-                mode='markers', name='突破20MA',
-                marker=dict(symbol='triangle-up', size=11, color='#E60000')
+                x=ma_signals.index.strftime('%Y-%m-%d'), y=ma_signals['Low'] * 0.985,
+                mode='markers', name='突破20MA', marker=dict(symbol='triangle-up', size=11, color='#E60000')
             ), row=1, col=1)
 
         kd_signals = plot_df[plot_df['Signal_KD']]
         if not kd_signals.empty:
             fig.add_trace(go.Scatter(
-                x=kd_signals.index.strftime('%Y-%m-%d'),
-                y=kd_signals['Low'] * 0.97,
-                mode='markers', name='KD金叉',
-                marker=dict(symbol='triangle-up', size=9, color='#0066FF')
+                x=kd_signals.index.strftime('%Y-%m-%d'), y=kd_signals['Low'] * 0.97,
+                mode='markers', name='KD金叉', marker=dict(symbol='triangle-up', size=9, color='#0066FF')
             ), row=1, col=1)
 
-        # KD 副圖
         fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['K'], mode='lines', name='K值', line=dict(color='#E60000', width=1.5)), row=2, col=1)
         fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['D'], mode='lines', name='D值', line=dict(color='#0066FF', width=1.5)), row=2, col=1)
         fig.add_hline(y=80, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
@@ -311,7 +312,7 @@ def plot_stock_chart(ticker, title_name):
 tab1, tab2, tab3 = st.tabs(["🚀 全方位技術與量價選股", "📊 法人與信用交易排行 Top 20", "⚔️ 主力籌碼對作模型"])
 
 # ----------------------------------------------------
-# TAB 1: 全方位技術與量價選股
+# TAB 1: 技術與量價選股
 # ----------------------------------------------------
 with tab1:
     st.subheader("1️⃣ 設定掃描範圍")
@@ -325,7 +326,7 @@ with tab1:
                  "2357", "3008", "2886", "2303", "3231", "2412", "2609", "2615", "3034", "3037",
                  "3443", "6415", "3661", "2379", "6669", "2345", "6274", "8069", "3529", "6515"]
         target_tickers = all_stocks_df[all_stocks_df["code"].isin(top30)]["ticker"].tolist()
-        st.info(f"已帶入流動性佳之代表股 {len(target_tickers)} 檔。")
+        st.info(f"已帶入核心代表股 {len(target_tickers)} 檔。")
     elif market_choice in ["全部上市", "全部上櫃"]:
         m_tag = "上市" if market_choice == "全部上市" else "上櫃"
         sub = all_stocks_df[all_stocks_df["market"] == m_tag]
@@ -363,7 +364,6 @@ with tab1:
             results = []
             progress_bar = st.progress(0, text="下載走勢與指標計算中...")
             
-            # 取得最新法人字典
             today_inst_dict = {}
             if not df_inst_all.empty:
                 df_today = df_inst_all[df_inst_all["date"] == latest_date]
@@ -378,10 +378,8 @@ with tab1:
                     if len(daily_df) < 65:
                         continue
 
-                    # 日線指標
                     daily_df = compute_indicators(daily_df)
 
-                    # 週線重組
                     weekly_df = daily_df.resample('W-FRI').agg({
                         'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
                     }).dropna()
@@ -401,7 +399,6 @@ with tab1:
 
                     pass_filter = True
 
-                    # 條件檢查
                     if chk_ma20 and not d_today['Signal_MA20']: pass_filter = False
                     if chk_ma60 and not d_today['Signal_MA60']: pass_filter = False
                     if chk_wma30 and not (pd.notna(w_today['WMA30']) and d_today['Close'] > w_today['WMA30'] and d_prev['Close'] <= w_prev['WMA30']):
@@ -469,7 +466,7 @@ with tab2:
     )
 
     if "外資" in rank_target or "投信" in rank_target:
-        p_choice = st.radio("統計天期", ["每日 (當日)", "三日累積", "每週 (五日累積)"], horizontal=True)
+        p_choice = st.radio("統計天期", ["每日 (當日)", "三日累積", "每週 (五日累積)"], horizontal=True, key="rank_period")
         day_n = {"每日 (當日)": 1, "三日累積": 3, "每週 (五日累積)": 5}[p_choice]
         use_dates = trade_dates[:day_n]
 
@@ -481,7 +478,7 @@ with tab2:
         sorted_df = grouped.sort_values(by=col_name, ascending=not is_buy).head(20).copy()
         sorted_df.rename(columns={
             "code": "代碼", "name": "名稱",
-            "foreign": "外資買賣超(張)", "trust": "投信買賣超(張)", "total_inst": "三大法人合計(張)"
+            "foreign": f"外資買賣超(張)", "trust": f"投信買賣超(張)", "total_inst": f"三大法人合計(張)"
         }, inplace=True)
         sorted_df.reset_index(drop=True, inplace=True)
         sorted_df.index += 1
@@ -512,65 +509,108 @@ with tab2:
             st.dataframe(res_df, use_container_width=True)
 
 # ----------------------------------------------------
-# TAB 3: 主力籌碼對作模型
+# TAB 3: 主力籌碼對作模型 (支援每日、三日、五日累積)
 # ----------------------------------------------------
 with tab3:
-    st.subheader("🎯 主力與散戶多空對作快速篩選 (前 20 名)")
+    st.subheader("🎯 主力與散戶多空對作累計篩選 (前 20 名)")
+    
+    # 新增週期選擇器
+    model_period = st.radio(
+        "選擇統計累積天期：",
+        ["每日 (當日)", "三日累積", "每週 (五日累積)"],
+        horizontal=True,
+        key="model_period_choice"
+    )
+    period_days = {"每日 (當日)": 1, "三日累積": 3, "每週 (五日累積)": 5}[model_period]
+    active_dates = trade_dates[:period_days]
+    period_label = "當日" if period_days == 1 else f"近{period_days}日"
+
+    st.caption(f"目前累計交易日：{', '.join(active_dates)} (共 {len(active_dates)} 天)")
+
     model_choice = st.selectbox(
         "選擇籌碼動態篩選模式：",
         [
-            "🔥 外資買超 + 融資減少 (外資吃貨/散戶退場)",
-            "⚠️ 外資賣超 + 融資增加 (主力出貨/散戶接刀)",
-            "🚀 投信買超 + 融資減少 (投信認養/浮額洗清)",
-            "⚠️ 投信賣超 + 融資增加 (投信倒貨/散戶承接)",
-            "💎 外資買超 + 投信買超 (土洋齊買/合力抬轎)",
-            "⚔️ 外資買超 + 投信賣超 (土洋對作/多空分歧)"
+            f"🔥 外資買超 + 融資減少 + 借券減少 ({period_label} 外資進場/空單大補/籌碼極度安定)",
+            f"⚠️ 外資賣超 + 融資增加 ({period_label} 主力出貨/散戶接刀)",
+            f"🚀 投信買超 + 融資減少 ({period_label} 投信認養/浮額洗清)",
+            f"⚠️ 投信賣超 + 融資增加 ({period_label} 投信倒貨/散戶承接)",
+            f"💎 外資買超 + 投信買超 ({period_label} 土洋齊買/合力抬轎)",
+            f"⚔️ 外資買超 + 投信賣超 ({period_label} 土洋對作/多空分歧)"
         ]
     )
 
-    df_inst_today = df_inst_all[df_inst_all["date"] == latest_date].copy()
-    merged_pool = []
-    for _, row in df_inst_today.iterrows():
-        c = row["code"]
-        if c in margin_data:
-            minfo = margin_data[c]
-            merged_pool.append({
-                "代碼": c, "名稱": row["name"],
-                "外資買賣超(張)": row["foreign"],
-                "投信買賣超(張)": row["trust"],
-                "融資增減(張)": minfo["margin_diff"],
-                "借券賣出(張)": minfo["sbl_short_sell"]
-            })
-    pool_df = pd.DataFrame(merged_pool)
+    # 1. 累計三大法人
+    sub_inst = df_inst_all[df_inst_all["date"].isin(active_dates)]
+    inst_agg = sub_inst.groupby(["code", "name"])[["foreign", "trust", "total_inst"]].sum().reset_index()
+
+    # 2. 累計信用交易與借券賣出
+    sub_margin = df_margin_all[df_margin_all["date"].isin(active_dates)]
+    margin_agg = sub_margin.groupby("code")[["margin_diff", "sbl_diff", "sbl_short_sell"]].sum().reset_index()
+
+    # 3. 整合為對作大數據庫
+    pool_df = pd.merge(inst_agg, margin_agg, on="code", how="inner")
+    
+    col_foreign = f"{period_label}外資(張)"
+    col_trust = f"{period_label}投信(張)"
+    col_margin_diff = f"{period_label}融資增減(張)"
+    col_sbl_diff = f"{period_label}借券賣出增減(張)"
+    col_sbl_sell = f"{period_label}借券賣出量(張)"
+
+    pool_df.rename(columns={
+        "code": "代碼",
+        "name": "名稱",
+        "foreign": col_foreign,
+        "trust": col_trust,
+        "margin_diff": col_margin_diff,
+        "sbl_diff": col_sbl_diff,
+        "sbl_short_sell": col_sbl_sell
+    }, inplace=True)
 
     if not pool_df.empty:
         out_df = pd.DataFrame()
-        if "外資買超 + 融資減少" in model_choice:
-            out_df = pool_df[(pool_df["外資買賣超(張)"] > 0) & (pool_df["融資增減(張)"] < 0)].sort_values(by="外資買賣超(張)", ascending=False).head(20)
+        
+        # 條件 1: 外資買超 + 融資減少 + 借券減少
+        if "外資買超 + 融資減少 + 借券減少" in model_choice:
+            cond = (pool_df[col_foreign] > 0) & (pool_df[col_margin_diff] < 0) & (pool_df[col_sbl_diff] < 0)
+            out_df = pool_df[cond].sort_values(by=col_foreign, ascending=False).head(20)
+
+        # 條件 2: 外資賣超 + 融資增加
         elif "外資賣超 + 融資增加" in model_choice:
-            out_df = pool_df[(pool_df["外資買賣超(張)"] < 0) & (pool_df["融資增減(張)"] > 0)].sort_values(by="外資買賣超(張)", ascending=True).head(20)
+            cond = (pool_df[col_foreign] < 0) & (pool_df[col_margin_diff] > 0)
+            out_df = pool_df[cond].sort_values(by=col_foreign, ascending=True).head(20)
+
+        # 條件 3: 投信買超 + 融資減少
         elif "投信買超 + 融資減少" in model_choice:
-            out_df = pool_df[(pool_df["投信買賣超(張)"] > 0) & (pool_df["融資增減(張)"] < 0)].sort_values(by="投信買賣超(張)", ascending=False).head(20)
+            cond = (pool_df[col_trust] > 0) & (pool_df[col_margin_diff] < 0)
+            out_df = pool_df[cond].sort_values(by=col_trust, ascending=False).head(20)
+
+        # 條件 4: 投信賣超 + 融資增加
         elif "投信賣超 + 融資增加" in model_choice:
-            out_df = pool_df[(pool_df["投信買賣超(張)"] < 0) & (pool_df["融資增減(張)"] > 0)].sort_values(by="投信買賣超(張)", ascending=True).head(20)
+            cond = (pool_df[col_trust] < 0) & (pool_df[col_margin_diff] > 0)
+            out_df = pool_df[cond].sort_values(by=col_trust, ascending=True).head(20)
+
+        # 條件 5: 外資買超 + 投信買超 (土洋齊買)
         elif "外資買超 + 投信買超" in model_choice:
-            c_both = (pool_df["外資買賣超(張)"] > 0) & (pool_df["投信買賣超(張)"] > 0)
-            pool_df["雙法人合買"] = pool_df["外資買賣超(張)"] + pool_df["投信買賣超(張)"]
-            out_df = pool_df[c_both].sort_values(by="雙法人合買", ascending=False).head(20).drop(columns=["雙法人合買"])
+            cond = (pool_df[col_foreign] > 0) & (pool_df[col_trust] > 0)
+            pool_df["雙法人合買"] = pool_df[col_foreign] + pool_df[col_trust]
+            out_df = pool_df[cond].sort_values(by="雙法人合買", ascending=False).head(20).drop(columns=["雙法人合買"])
+
+        # 條件 6: 外資買超 + 投信賣超 (土洋對作)
         elif "外資買超 + 投信賣超" in model_choice:
-            out_df = pool_df[(pool_df["外資買賣超(張)"] > 0) & (pool_df["投信買賣超(張)"] < 0)].sort_values(by="外資買賣超(張)", ascending=False).head(20)
+            cond = (pool_df[col_foreign] > 0) & (pool_df[col_trust] < 0)
+            out_df = pool_df[cond].sort_values(by=col_foreign, ascending=False).head(20)
 
         if not out_df.empty:
             out_df.reset_index(drop=True, inplace=True)
             out_df.index += 1
-            st.success(f"符合「{model_choice}」共 {len(out_df)} 檔：")
+            st.success(f"🎯 符合「{model_choice}」共 **{len(out_df)}** 檔：")
             st.dataframe(out_df, use_container_width=True)
 
             st.divider()
-            st.subheader("📈 點選查看該股 K 線圖")
+            st.subheader("📈 點選查看該股互動走勢圖")
             code_opts = {r["代碼"]: f"{r['代碼']} {r['名稱']}" for _, r in out_df.iterrows()}
-            chosen = st.selectbox("選擇要繪製走勢圖的股票：", list(code_opts.keys()), format_func=lambda x: code_opts[x])
+            chosen = st.selectbox("選擇要繪製走勢圖的股票：", list(code_opts.keys()), format_func=lambda x: code_opts[x], key="model_chart_select")
             if chosen:
                 plot_stock_chart(f"{chosen}.TW", code_opts[chosen])
         else:
-            st.warning("今日暫無符合該條件之標的。")
+            st.warning(f"在 {period_label} 的統計期間內，暫無符合該條件的標的。")
