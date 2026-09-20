@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import requests
+import re
 from datetime import datetime, timedelta
 import yfinance as yf
 import plotly.graph_objects as go
@@ -9,12 +10,12 @@ from plotly.subplots import make_subplots
 
 # 頁面基礎配置
 st.set_page_config(page_title="台股全方位量價籌碼戰情室", layout="wide")
-st.title("📈 台股全方位量價籌碼戰情室 & 技術選股神器")
+st.title("📈 台股全方位量價籌碼戰情室 & 券商分點集中度神器")
 
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # ====================================================
-# 1. 抓取全台股上市上櫃股票清單 (快取 24 小時)
+# 1. 抓取全台股上市上櫃清單 (快取 24 小時)
 # ====================================================
 @st.cache_data(ttl=86400)
 def fetch_all_stocks():
@@ -68,7 +69,7 @@ def get_recent_trading_dates(count=5):
     dates = []
     curr = datetime.now()
     while len(dates) < count and (datetime.now() - curr).days < 15:
-        if curr.weekday() < 5:  # 排除週六、日
+        if curr.weekday() < 5:
             d_str = curr.strftime("%Y%m%d")
             url = f"https://www.twse.com.tw/rwd/zh/fund/T86?date={d_str}&selectType=ALL&response=json"
             try:
@@ -81,7 +82,7 @@ def get_recent_trading_dates(count=5):
     return dates
 
 # ====================================================
-# 3. 抓取多日三大法人買賣超 (快取 2 小時)
+# 3. 抓取三大法人多日買賣超 (快取 2 小時)
 # ====================================================
 @st.cache_data(ttl=7200)
 def fetch_multi_day_inst(dates):
@@ -104,10 +105,10 @@ def fetch_multi_day_inst(dates):
                             "date": d,
                             "code": code,
                             "name": name,
-                            "foreign": to_lots(row[4]),    # 外資
-                            "trust": to_lots(row[10]),      # 投信
-                            "dealer": to_lots(row[11]),     # 自營商
-                            "total_inst": to_lots(row[18])  # 三大法人合計
+                            "foreign": to_lots(row[4]),
+                            "trust": to_lots(row[10]),
+                            "dealer": to_lots(row[11]),
+                            "total_inst": to_lots(row[18])
                         })
         except Exception:
             continue
@@ -185,7 +186,7 @@ def fetch_multi_day_margin_and_sbl(dates):
     return pd.DataFrame(records)
 
 # 載入開盤日數據
-with st.spinner("同步臺灣證券交易所多日大數據中..."):
+with st.spinner("同步臺灣證券交易所最新法人與信用交易大數據中..."):
     trade_dates = get_recent_trading_dates(count=5)
     latest_date = trade_dates[0] if trade_dates else datetime.now().strftime("%Y%m%d")
     df_inst_all = fetch_multi_day_inst(trade_dates)
@@ -195,7 +196,70 @@ latest_margin_df = df_margin_all[df_margin_all["date"] == latest_date] if not df
 margin_data = {r["code"]: r.to_dict() for _, r in latest_margin_df.iterrows()} if not latest_margin_df.empty else {}
 
 # ====================================================
-# 5. 技術指標計算輔助
+# 5. 券商分點籌碼集中度計算 (FinMind 公開 API，快取 12 小時)
+# ====================================================
+@st.cache_data(ttl=43200)
+def fetch_broker_concentration(stock_code, days=10):
+    """
+    抓取特定個股在近 N 個交易日內所有券商分點買賣明細，
+    計算籌碼集中度 (%) = (前15大買超張數 - 前15大賣超張數) / 總成交量 * 100
+    並回傳前 3 大買超主力分點名稱。
+    """
+    end_d = datetime.now()
+    # 考量假日，往前抓取足夠天數
+    start_d = end_d - timedelta(days=int(days * 1.8))
+    
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockPriceBidAsk",
+        "data_id": stock_code,
+        "start_date": start_d.strftime("%Y-%m-%d"),
+        "end_date": end_d.strftime("%Y-%m-%d")
+    }
+    
+    try:
+        res = requests.get(url, params=params, headers=HEADERS, timeout=8).json()
+        if res.get("msg") == "success" and "data" in res and len(res["data"]) > 0:
+            df_bs = pd.DataFrame(res["data"])
+            # 只取最近 N 個交易日
+            unique_dates = sorted(df_bs["date"].unique(), reverse=True)[:days]
+            df_recent = df_bs[df_bs["date"].isin(unique_dates)].copy()
+
+            # 計算各券商分點在該天期內的買賣超張數
+            df_recent["diff"] = (df_recent["buy"] - df_recent["sell"]) // 1000  # 轉為張
+            broker_summary = df_recent.groupby("broker_name")["diff"].sum().reset_index()
+
+            # 前 15 大買超券商合計
+            top_buyers = broker_summary.sort_values(by="diff", ascending=False).head(15)
+            buy_sum = top_buyers[top_buyers["diff"] > 0]["diff"].sum()
+
+            # 前 15 大賣超券商合計 (轉正數方便相減)
+            top_sellers = broker_summary.sort_values(by="diff", ascending=True).head(15)
+            sell_sum = abs(top_sellers[top_sellers["diff"] < 0]["diff"].sum())
+
+            # 該期間個股總成交張數
+            total_vol = (df_recent["buy"].sum() + df_recent["sell"].sum()) // 2000
+
+            if total_vol > 0:
+                concentration = round(((buy_sum - sell_sum) / total_vol) * 100, 2)
+            else:
+                concentration = 0.0
+
+            # 抓出前 3 大吃貨主力券商名單
+            top3_names = []
+            for _, r in top_buyers.head(3).iterrows():
+                if r["diff"] > 0:
+                    top3_names.append(f"{r['broker_name']}(+{int(r['diff'])}張)")
+            top_brokers_str = ", ".join(top3_names) if top3_names else "無明顯買超主力"
+
+            return concentration, top_brokers_str
+    except Exception:
+        pass
+        
+    return None, "數據不足"
+
+# ====================================================
+# 6. 技術指標計算輔助
 # ====================================================
 def compute_rsi(series, period=14):
     delta = series.diff()
@@ -215,7 +279,6 @@ def compute_kd(df, n=9):
         d = (2/3) * d_list[-1] + (1/3) * k
         k_list.append(k)
         d_list.append(d)
-    
     df['K'] = k_list[1:]
     df['D'] = d_list[1:]
     return df
@@ -236,7 +299,6 @@ def compute_indicators(df):
     df['Prev_RSI6'] = df['RSI_6'].shift(1)
     df['Prev_RSI12'] = df['RSI_12'].shift(1)
 
-    # 判定單日突破/金叉訊號
     df['Signal_MA20'] = (df['Prev_Close'] <= df['Prev_MA20']) & (df['Close'] > df['MA20'])
     df['Signal_MA60'] = (df['Prev_Close'] <= df['Prev_MA60']) & (df['Close'] > df['MA60'])
     df['Signal_KD'] = (df['Prev_K'] <= df['Prev_D']) & (df['K'] > df['D'])
@@ -244,7 +306,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 6. Plotly 互動式 K 線與訊號圖
+# 7. Plotly 互動式走勢圖
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -307,18 +369,22 @@ def plot_stock_chart(ticker, title_name):
         st.error(f"線圖載入失敗: {e}")
 
 # ====================================================
-# 7. 主介面分頁導航
+# 8. 主介面分頁導航
 # ====================================================
-tab1, tab2, tab3 = st.tabs(["🚀 全方位技術與量價選股", "📊 法人與信用交易排行 Top 20", "⚔️ 主力籌碼對作模型"])
+tab1, tab2, tab3 = st.tabs(["🚀 全方位技術量價 & 分點選股", "📊 法人與信用交易排行 Top 20", "⚔️ 主力籌碼對作模型"])
 
 # ----------------------------------------------------
-# TAB 1: 技術與量價選股
+# TAB 1: 全方位技術量價 & 分點集中度選股
 # ----------------------------------------------------
 with tab1:
     st.subheader("1️⃣ 設定掃描範圍")
     c_m1, c_m2 = st.columns([1, 2])
     with c_m1:
-        market_choice = st.radio("範圍選擇", ["市值核心股 (30檔)", "全部上市", "全部上櫃", "自訂挑選"], index=0)
+        market_choice = st.radio(
+            "範圍選擇",
+            ["市值核心股 (30檔)", "全部上市", "全部上櫃", "自訂挑選", "📥 元大/自選清單匯入"],
+            index=0
+        )
 
     target_tickers = []
     if market_choice == "市值核心股 (30檔)":
@@ -326,18 +392,38 @@ with tab1:
                  "2357", "3008", "2886", "2303", "3231", "2412", "2609", "2615", "3034", "3037",
                  "3443", "6415", "3661", "2379", "6669", "2345", "6274", "8069", "3529", "6515"]
         target_tickers = all_stocks_df[all_stocks_df["code"].isin(top30)]["ticker"].tolist()
-        st.info(f"已帶入核心代表股 {len(target_tickers)} 檔。")
+        st.info(f"已帶入核心焦點股共 {len(target_tickers)} 檔。")
     elif market_choice in ["全部上市", "全部上櫃"]:
         m_tag = "上市" if market_choice == "全部上市" else "上櫃"
         sub = all_stocks_df[all_stocks_df["market"] == m_tag]
-        scan_limit = st.slider("掃描檔數 (建議 30~50 檔維持手機順暢度)", 10, len(sub), 30, step=10)
+        scan_limit = st.slider("掃描檔數 (建議 30~40 檔維持手機順暢度)", 10, len(sub), 25, step=5)
         target_tickers = sub["ticker"].head(scan_limit).tolist()
+    elif market_choice == "📥 元大/自選清單匯入":
+        import_mode = st.radio("匯入模式", ["文字直接貼上 (推薦)", "上傳 CSV / 檔案"], horizontal=True)
+        raw_codes = []
+        if import_mode == "文字直接貼上 (推薦)":
+            txt = st.text_area("請直接貼上元大 App 複製的文字或股票清單 (含中文字、符號自動精準解析)：", height=80, placeholder="例如：2330 台積電 2317 鴻海 (2454聯發科)")
+            if txt:
+                raw_codes = re.findall(r'\b\d{4}\b', txt)
+        else:
+            up_file = st.file_uploader("上傳元大或自選股 CSV / TXT", type=["csv", "txt"])
+            if up_file:
+                content = up_file.read().decode("utf-8", errors="ignore")
+                raw_codes = re.findall(r'\b\d{4}\b', content)
+
+        if raw_codes:
+            unique_codes = list(set(raw_codes))
+            matched = all_stocks_df[all_stocks_df["code"].isin(unique_codes)]
+            target_tickers = matched["ticker"].tolist()
+            st.success(f"✅ 成功辨識並匯入 {len(target_tickers)} 檔股票！")
+        else:
+            st.caption("請貼上文字以載入股票。")
     else:
         selected_display = st.multiselect("搜尋股票 (支援中文或代碼)", options=all_stocks_df["display"].tolist(), default=all_stocks_df["display"].head(5).tolist())
         target_tickers = all_stocks_df[all_stocks_df["display"].isin(selected_display)]["ticker"].tolist()
 
-    st.subheader("2️⃣ 勾選過濾條件")
-    col1, col2, col3 = st.columns(3)
+    st.subheader("2️⃣ 勾選篩選條件")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown("**【均線突破】**")
         chk_ma20 = st.checkbox("近3日突破 20 日線 (月線)", value=True)
@@ -346,28 +432,32 @@ with tab1:
     with col2:
         st.markdown("**【KD / RSI 指標】**")
         chk_daily_kd = st.checkbox("近3日 KD 黃金交叉", value=True)
-        chk_daily_rsi = st.checkbox("近3日 RSI 黃金交叉 (6穿12)")
+        chk_daily_rsi = st.checkbox("近3日 RSI 黃金交叉")
         chk_weekly_kd = st.checkbox("當日/當週 KD 黃金交叉")
         chk_weekly_rsi = st.checkbox("當日/當週 RSI 黃金交叉")
     with col3:
-        st.markdown("**【量能與法人買超門檻】**")
+        st.markdown("**【量能與法人門檻】**")
         chk_vol_burst = st.checkbox("今日爆量 (>5日均量)", value=True)
         vol_multiple = st.selectbox("爆量倍數", [1.5, 2.0, 3.0], index=0)
-        min_vol_limit = st.number_input("今日最低成交量 (張)", value=500, step=500)
-        
-        st.markdown("---")
+        min_vol_limit = st.number_input("最低成交量 (張)", value=500, step=500)
         chk_trust_buy = st.checkbox("限制投信買超")
-        min_trust_lots = st.number_input("投信當日買超至少 (張)", value=100, step=100, disabled=not chk_trust_buy)
-        
+        min_trust_lots = st.number_input("投信買超至少 (張)", value=100, step=100, disabled=not chk_trust_buy)
         chk_foreign_buy = st.checkbox("限制外資買超")
-        min_foreign_lots = st.number_input("外資當日買超至少 (張)", value=500, step=200, disabled=not chk_foreign_buy)
+        min_foreign_lots = st.number_input("外資買超至少 (張)", value=500, step=200, disabled=not chk_foreign_buy)
+    
+    with col4:
+        st.markdown("**【🔥 券商分點集中買進】**")
+        chk_broker_10 = st.checkbox("10日 券商集中買進")
+        min_conc_10 = st.number_input("10日 集中度大於 (%)", value=10.0, step=2.0, disabled=not chk_broker_10)
+        chk_broker_20 = st.checkbox("20日 券商集中買進")
+        min_conc_20 = st.number_input("20日 集中度大於 (%)", value=15.0, step=2.0, disabled=not chk_broker_20)
 
     if st.button("🚀 開始全方位篩選", use_container_width=True):
         if not target_tickers:
             st.warning("請先選定股票觀察名單！")
         else:
             results = []
-            progress_bar = st.progress(0, text="下載走勢與指標計算中...")
+            progress_bar = st.progress(0, text="下載走勢與籌碼分點大數據中...")
             
             today_inst_dict = {}
             if not df_inst_all.empty:
@@ -378,12 +468,13 @@ with tab1:
             for idx, ticker in enumerate(target_tickers):
                 progress_bar.progress((idx + 1) / len(target_tickers), text=f"分析中 ({idx+1}/{len(target_tickers)}): {ticker}")
                 try:
+                    code = ticker.split(".")[0]
                     stock = yf.Ticker(ticker)
                     daily_df = stock.history(period="2y")
                     if len(daily_df) < 65:
                         continue
 
-                    # 日線指標計算 (包含單日 Signal)
+                    # 日線指標計算
                     daily_df = compute_indicators(daily_df)
 
                     # 週線重組
@@ -402,7 +493,6 @@ with tab1:
                     weekly_df['Prev_RSI6'] = weekly_df['RSI_6'].shift(1)
                     weekly_df['Prev_RSI12'] = weekly_df['RSI_12'].shift(1)
 
-                    # 週線訊號標記
                     weekly_df['Signal_WMA30'] = (weekly_df['Prev_Close'] <= weekly_df['Prev_WMA30']) & (weekly_df['Close'] > weekly_df['WMA30'])
                     weekly_df['Signal_W_KD'] = (weekly_df['Prev_K'] <= weekly_df['Prev_D']) & (weekly_df['K'] > weekly_df['D'])
                     weekly_df['Signal_W_RSI'] = (weekly_df['Prev_RSI6'] <= weekly_df['Prev_RSI12']) & (weekly_df['RSI_6'] > weekly_df['RSI_12'])
@@ -411,55 +501,66 @@ with tab1:
                     d_prev = daily_df.iloc[-2]
                     w_today = weekly_df.iloc[-1]
 
-                    code = ticker.split(".")[0]
                     inst_info = today_inst_dict.get(code, {"foreign": 0, "trust": 0, "total_inst": 0})
                     today_vol_lots = d_today['Volume'] / 1000
 
-                    # 取近 3 根日 K 與近 3 根週 K
                     recent3_daily = daily_df.tail(3)
                     recent3_weekly = weekly_df.tail(3)
 
                     pass_filter = True
 
-                    # 1. 均線突破
-                    # 近 3 日任一日突破 20MA
+                    # 1. 均線與技術面檢查
                     if chk_ma20 and not recent3_daily['Signal_MA20'].any(): pass_filter = False
-                    # 近 3 日任一日突破 60MA
                     if chk_ma60 and not recent3_daily['Signal_MA60'].any(): pass_filter = False
-                    # 近 3 週任一週突破 30 週線
                     if chk_wma30 and not recent3_weekly['Signal_WMA30'].any(): pass_filter = False
 
-                    # 2. KD / RSI 指標
-                    # 近 3 日任一日 KD 金叉
                     if chk_daily_kd and not recent3_daily['Signal_KD'].any(): pass_filter = False
-                    # 近 3 日任一日 RSI 金叉
                     if chk_daily_rsi and not recent3_daily['Signal_RSI'].any(): pass_filter = False
-                    # 週 KD 改為【當日/當週交叉】
                     if chk_weekly_kd and not w_today['Signal_W_KD']: pass_filter = False
-                    # 週 RSI 改為【當日/當週交叉】
                     if chk_weekly_rsi and not w_today['Signal_W_RSI']: pass_filter = False
 
-                    # 3. 量能檢查
+                    # 2. 量能與法人檢查
                     if today_vol_lots < min_vol_limit: pass_filter = False
                     if chk_vol_burst and (d_today['Volume'] < (d_prev['Vol_MA5'] * vol_multiple)): pass_filter = False
-
-                    # 4. 法人買超自訂門檻檢查
                     if chk_trust_buy and inst_info["trust"] < min_trust_lots: pass_filter = False
                     if chk_foreign_buy and inst_info["foreign"] < min_foreign_lots: pass_filter = False
+
+                    # 3. 券商分點集中度檢查 (核心新增)
+                    conc_10_val, brokers_10_str = None, "-"
+                    conc_20_val, brokers_20_str = None, "-"
+
+                    if pass_filter and (chk_broker_10 or chk_broker_20):
+                        if chk_broker_10:
+                            conc_10_val, brokers_10_str = fetch_broker_concentration(code, days=10)
+                            if conc_10_val is None or conc_10_val < min_conc_10:
+                                pass_filter = False
+                        
+                        if chk_broker_20 and pass_filter:
+                            conc_20_val, brokers_20_str = fetch_broker_concentration(code, days=20)
+                            if conc_20_val is None or conc_20_val < min_conc_20:
+                                pass_filter = False
 
                     if pass_filter:
                         match = all_stocks_df[all_stocks_df["ticker"] == ticker]
                         stock_title = match["display"].values[0] if not match.empty else ticker
-                        results.append({
+                        
+                        row_item = {
                             "ticker": ticker,
                             "股票": stock_title,
                             "收盤價": round(d_today['Close'], 2),
                             "今日成交量(張)": int(today_vol_lots),
                             "外資買賣超(張)": inst_info["foreign"],
                             "投信買賣超(張)": inst_info["trust"],
-                            "日K / 日D": f"{round(d_today['K'], 1)} / {round(d_today['D'], 1)}",
-                            "週K / 週D": f"{round(w_today['K'], 1)} / {round(w_today['D'], 1)}"
-                        })
+                            "日K / 日D": f"{round(d_today['K'], 1)} / {round(d_today['D'], 1)}"
+                        }
+                        if chk_broker_10:
+                            row_item["10日集中度"] = f"{conc_10_val}%" if conc_10_val is not None else "-"
+                            row_item["10日主要吃貨券商"] = brokers_10_str
+                        if chk_broker_20:
+                            row_item["20日集中度"] = f"{conc_20_val}%" if conc_20_val is not None else "-"
+                            row_item["20日主要吃貨券商"] = brokers_20_str
+
+                        results.append(row_item)
                 except Exception:
                     continue
 
@@ -570,15 +671,12 @@ with tab3:
         ]
     )
 
-    # 1. 累計三大法人
     sub_inst = df_inst_all[df_inst_all["date"].isin(active_dates)]
     inst_agg = sub_inst.groupby(["code", "name"])[["foreign", "trust", "total_inst"]].sum().reset_index()
 
-    # 2. 累計信用交易與借券賣出
     sub_margin = df_margin_all[df_margin_all["date"].isin(active_dates)]
     margin_agg = sub_margin.groupby("code")[["margin_diff", "sbl_diff", "sbl_short_sell"]].sum().reset_index()
 
-    # 3. 整合為對作大數據庫
     pool_df = pd.merge(inst_agg, margin_agg, on="code", how="inner")
     
     col_foreign = f"{period_label}外資(張)"
@@ -600,33 +698,27 @@ with tab3:
     if not pool_df.empty:
         out_df = pd.DataFrame()
         
-        # 條件 1: 外資買超 + 融資減少 + 借券減少
         if "外資買超 + 融資減少 + 借券減少" in model_choice:
             cond = (pool_df[col_foreign] > 0) & (pool_df[col_margin_diff] < 0) & (pool_df[col_sbl_diff] < 0)
             out_df = pool_df[cond].sort_values(by=col_foreign, ascending=False).head(20)
 
-        # 條件 2: 外資賣超 + 融資增加
         elif "外資賣超 + 融資增加" in model_choice:
             cond = (pool_df[col_foreign] < 0) & (pool_df[col_margin_diff] > 0)
             out_df = pool_df[cond].sort_values(by=col_foreign, ascending=True).head(20)
 
-        # 條件 3: 投信買超 + 融資減少
         elif "投信買超 + 融資減少" in model_choice:
             cond = (pool_df[col_trust] > 0) & (pool_df[col_margin_diff] < 0)
             out_df = pool_df[cond].sort_values(by=col_trust, ascending=False).head(20)
 
-        # 條件 4: 投信賣超 + 融資增加
         elif "投信賣超 + 融資增加" in model_choice:
             cond = (pool_df[col_trust] < 0) & (pool_df[col_margin_diff] > 0)
             out_df = pool_df[cond].sort_values(by=col_trust, ascending=True).head(20)
 
-        # 條件 5: 外資買超 + 投信買超 (土洋齊買)
         elif "外資買超 + 投信買超" in model_choice:
             cond = (pool_df[col_foreign] > 0) & (pool_df[col_trust] > 0)
             pool_df["雙法人合買"] = pool_df[col_foreign] + pool_df[col_trust]
             out_df = pool_df[cond].sort_values(by="雙法人合買", ascending=False).head(20).drop(columns=["雙法人合買"])
 
-        # 條件 6: 外資買超 + 投信賣超 (土洋對作)
         elif "外資買超 + 投信賣超" in model_choice:
             cond = (pool_df[col_foreign] > 0) & (pool_df[col_trust] < 0)
             out_df = pool_df[cond].sort_values(by=col_foreign, ascending=False).head(20)
