@@ -297,7 +297,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 7. 券商專業看盤版面 (長型均線指示條 + 取消手動框選 + 手勢滑動縮放)
+# 7. 券商專業看盤版面 (刪除Y軸負數 + 右下角快捷游標列 + 起算日標記)
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -356,7 +356,7 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
-        # 3. 獨立長型均線數據指示條 (徹底解決與時間選項重疊)
+        # 3. 獨立長型均線數據指示條 (避免與時間按鈕重疊)
         def fmt_val(v):
             return f"{v:.2f}" if pd.notna(v) else "-"
 
@@ -408,7 +408,7 @@ def plot_stock_chart(ticker, title_name):
             showlegend=False
         ), row=1, col=1)
 
-        # 4. 均線群 (已獨立於上方指示條呈現，此處設為不顯示原生 Legend)
+        # 4. 均線群 (以獨立長條呈現，關閉原生 Legend)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', name='5MA', line=dict(color='#EAB308', width=1.1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10MA', line=dict(color='#A855F7', width=1.1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='20MA', line=dict(color='#38BDF8', width=1.3), showlegend=False), row=1, col=1)
@@ -448,11 +448,41 @@ def plot_stock_chart(ticker, title_name):
         fig.add_hline(y=80, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
         fig.add_hline(y=20, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
 
-        # 預設顯示近 5 個月
+        # ----------------------------------------------------
+        # 標記 5日、10日、20日、60日、240日前起算日（彩色三角形標註於主圖底部）
+        # ----------------------------------------------------
+        n_days_map = [
+            (5, "#EAB308", "5日起算"),
+            (10, "#A855F7", "10日起算"),
+            (20, "#38BDF8", "20日起算"),
+            (60, "#F97316", "60日起算"),
+            (240, "#EC4899", "240日起算")
+        ]
+
+        min_price = df['Low'].min()
+        marker_y = min_price * 0.985 if min_price > 0 else 0
+
+        for n_day, color, label in n_days_map:
+            if len(df) >= n_day:
+                target_date = df.index[-n_day]
+                fig.add_trace(go.Scatter(
+                    x=[target_date], y=[marker_y],
+                    mode='markers+text',
+                    marker=dict(symbol='triangle-up', size=11, color=color),
+                    text=[f"{n_day}D"],
+                    textposition="bottom center",
+                    textfont=dict(size=9, color=color),
+                    name=label,
+                    hoverinfo='text',
+                    hovertext=f"{label}交易日: {target_date.strftime('%Y-%m-%d')}",
+                    showlegend=False
+                ), row=1, col=1)
+
+        # 預設時間範圍
         last_d = df.index[-1]
         start_d = last_d - timedelta(days=150)
 
-        # X 軸配置：取消手動框選時間段，時間選項乾淨置頂
+        # X 軸配置
         fig.update_xaxes(
             type="date",
             range=[start_d, last_d],
@@ -471,7 +501,7 @@ def plot_stock_chart(ticker, title_name):
                 activecolor="#2563EB",
                 font=dict(color="#F1F5F9", size=11),
                 yanchor="bottom",
-                y=1.02, # 向上推開，獨立於圖表之外，不再被遮擋
+                y=1.02,
                 xanchor="left",
                 x=0
             ),
@@ -479,25 +509,82 @@ def plot_stock_chart(ticker, title_name):
             gridcolor="#1e2638", zerolinecolor="#1e2638"
         )
 
-        fig.update_yaxes(gridcolor="#1e2638", zerolinecolor="#1e2638", fixedrange=False)
+        # ----------------------------------------------------
+        # 刪除 Y 軸股價負數刻度 (rangemode='nonnegative')
+        # ----------------------------------------------------
+        fig.update_yaxes(
+            rangemode='nonnegative', # 絕對不出現負數股價刻度
+            gridcolor="#1e2638",
+            zerolinecolor="#1e2638",
+            fixedrange=False
+        )
 
-        # 互動模式優化：dragmode='pan' 實現手指左右滑動平移
+        # ----------------------------------------------------
+        # 於 K 線圖右下角內嵌縮放及左右選取游標圖示列 (仿參考圖)
+        # ----------------------------------------------------
+        controls_menu = [
+            dict(
+                type="buttons",
+                direction="right",
+                x=0.98,
+                y=0.42,
+                xanchor="right",
+                yanchor="bottom",
+                bgcolor="rgba(18, 24, 38, 0.85)",
+                bordercolor="#2D3748",
+                borderwidth=1,
+                pad=dict(r=3, t=2, b=2, l=3),
+                buttons=[
+                    dict(
+                        label="✕",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}]
+                    ),
+                    dict(
+                        label="＋",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=70), last_d]}]
+                    ),
+                    dict(
+                        label="－",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=365), last_d]}]
+                    ),
+                    dict(
+                        label="◀",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=220), last_d - timedelta(days=70)]}]
+                    ),
+                    dict(
+                        label="▶",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=110), last_d]}]
+                    ),
+                    dict(
+                        label="⏭",
+                        method="relayout",
+                        args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}]
+                    )
+                ]
+            )
+        ]
+
         fig.update_layout(
             height=700,
-            dragmode="pan", # 手指左右拖曳為平移移動，不變更大小
-            showlegend=False, # 關閉內嵌圖例
+            dragmode="pan",
+            showlegend=False,
             paper_bgcolor="#0A0E17",
             plot_bgcolor="#0A0E17",
             font=dict(color="#94A3B8"),
             margin=dict(l=10, r=10, t=40, b=10),
-            hovermode="x unified"
+            hovermode="x unified",
+            updatemenus=controls_menu
         )
 
-        # 啟用滾動/拉動縮放，並徹底隱藏右上方遮擋的工具列
         config = {
-            "scrollZoom": True,            # 手指往上拉/往下拉支援縮放放大縮小
-            "displayModeBar": False,       # 關閉相機、十字、Zoom按鈕列，介面乾淨不重疊
-            "doubleClick": "reset"         # 點兩下立即還原預設範圍
+            "scrollZoom": True,
+            "displayModeBar": False,
+            "doubleClick": "reset"
         }
 
         st.plotly_chart(fig, use_container_width=True, config=config)
@@ -874,4 +961,3 @@ with tab3:
                 plot_stock_chart(f"{chosen}.TW", code_opts[chosen])
         else:
             st.warning(f"在 {period_label} 的統計期間內，暫無符合該條件的標的。")
-
