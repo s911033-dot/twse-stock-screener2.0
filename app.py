@@ -270,7 +270,6 @@ def compute_kd(df, n=9):
     return df
 
 def compute_indicators(df):
-    # 新增 5MA, 10MA, 240MA
     df['MA5'] = df['Close'].rolling(5).mean()
     df['MA10'] = df['Close'].rolling(10).mean()
     df['MA20'] = df['Close'].rolling(20).mean()
@@ -278,6 +277,7 @@ def compute_indicators(df):
     df['MA240'] = df['Close'].rolling(240).mean()
 
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
+    df['Vol_MA20'] = df['Volume'].rolling(20).mean()
     df['RSI_6'] = compute_rsi(df['Close'], 6)
     df['RSI_12'] = compute_rsi(df['Close'], 12)
     df = compute_kd(df, 9)
@@ -297,73 +297,146 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 7. Plotly 互動式走勢圖 (5年走勢 + 5/10/20/60/240均線 + 順暢縮放)
+# 7. 券商專業看盤版面 (仿投資先生深黑 UI + 布林通道 + 5/10/20/60/240均線)
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
         stock = yf.Ticker(ticker)
-        # 擴大至 5 年走勢
         df = stock.history(period="5y")
         if len(df) < 30:
             st.warning("歷史數據不足以繪圖。")
             return
 
         df = compute_indicators(df)
-        plot_df = df.copy()
 
-        fig = make_subplots(
-            rows=2, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.04,
-            row_heights=[0.72, 0.28],
-            subplot_titles=(f"{title_name} 5年走勢圖 (含 5/10/20/60/240MA)", "KD (9, 3, 3)")
+        # 計算布林通道 (20MA, 2倍標準差)
+        df['STD20'] = df['Close'].rolling(20).std()
+        df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
+        df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
+
+        # 取得最新行情數據
+        latest = df.iloc[-1]
+        prev = df.iloc[-2]
+        close_price = latest['Close']
+        price_diff = close_price - prev['Close']
+        pct_diff = (price_diff / prev['Close']) * 100
+        vol_lots = int(latest['Volume'] / 1000)
+
+        theme_color = "#FF334B" if price_diff >= 0 else "#00C853"
+        arrow = "▲" if price_diff >= 0 else "▼"
+
+        # 頂部即時報價卡
+        st.markdown(
+            f"""
+            <div style="background-color: #121826; padding: 12px 18px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1f293d;">
+                <div>
+                    <span style="font-size: 22px; font-weight: bold; color: #FFFFFF;">{title_name}</span>
+                    <span style="color: #94A3B8; font-size: 13px; margin-left: 8px;">市 {ticker.split('.')[0]}</span>
+                </div>
+                <div style="text-align: right;">
+                    <span style="font-size: 26px; font-weight: bold; color: {theme_color};">{close_price:.2f}</span>
+                    <span style="font-size: 15px; font-weight: bold; color: {theme_color}; margin-left: 8px;">{arrow} {abs(price_diff):.2f} ({pct_diff:+.2f}%)</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
         )
 
-        # 1. 主圖：K 線 (紅漲綠跌)
-        fig.add_trace(go.Candlestick(
-            x=plot_df.index,
-            open=plot_df['Open'], high=plot_df['High'],
-            low=plot_df['Low'], close=plot_df['Close'],
-            name="K線", increasing_line_color='#FF4B4B', decreasing_line_color='#00873E'
+        # 開高低收狀態條
+        st.markdown(
+            f"""
+            <div style="background-color: #0d111a; padding: 6px 12px; border-radius: 4px; font-size: 12px; color: #CBD5E1; display: flex; justify-content: space-between; margin-bottom: 4px; border: 1px solid #161f30;">
+                <span>開: <b style="color:#FFF;">{latest['Open']:.2f}</b></span>
+                <span>高: <b style="color:#FF334B;">{latest['High']:.2f}</b></span>
+                <span>低: <b style="color:#00C853;">{latest['Low']:.2f}</b></span>
+                <span>收: <b style="color:{theme_color};">{close_price:.2f}</b></span>
+                <span>量: <b style="color:#F59E0B;">{vol_lots:,} 張</b></span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        # 建立三層子圖
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.03,
+            row_heights=[0.58, 0.22, 0.20]
+        )
+
+        # 1. 布林通道下軌
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Lower'],
+            line=dict(color='rgba(59, 130, 246, 0.4)', width=1),
+            name='布林下軌', showlegend=False
         ), row=1, col=1)
 
-        # 2. 均線配置：5MA, 10MA, 20MA, 60MA, 240MA
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA5'], mode='lines', name='5MA (週線)', line=dict(color='#1E90FF', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA10'], mode='lines', name='10MA (雙週)', line=dict(color='#9370DB', width=1.2)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA20'], mode='lines', name='20MA (月線)', line=dict(color='#FFA500', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA60'], mode='lines', name='60MA (季線)', line=dict(color='#20B2AA', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA240'], mode='lines', name='240MA (年線)', line=dict(color='#DC143C', width=1.8)), row=1, col=1)
+        # 2. 布林通道上軌 (半透明陰影)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['BB_Upper'],
+            line=dict(color='rgba(59, 130, 246, 0.4)', width=1),
+            fill='tonexty',
+            fillcolor='rgba(59, 130, 246, 0.08)',
+            name='布林通道', showlegend=False
+        ), row=1, col=1)
 
-        # 3. 買進訊號標註
-        ma_signals = plot_df[plot_df['Signal_MA20']]
+        # 3. K 線
+        fig.add_trace(go.Candlestick(
+            x=df.index,
+            open=df['Open'], high=df['High'],
+            low=df['Low'], close=df['Close'],
+            name="K線",
+            increasing_line_color='#FF334B', increasing_fillcolor='#FF334B',
+            decreasing_line_color='#00C853', decreasing_fillcolor='#00C853'
+        ), row=1, col=1)
+
+        # 4. 均線群
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', name='5MA', line=dict(color='#EAB308', width=1.1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10MA', line=dict(color='#A855F7', width=1.1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='20MA', line=dict(color='#38BDF8', width=1.3)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', name='60MA', line=dict(color='#F97316', width=1.3)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA240'], mode='lines', name='240MA', line=dict(color='#EC4899', width=1.5)), row=1, col=1)
+
+        # 5. 買進訊號標註
+        ma_signals = df[df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
                 x=ma_signals.index, y=ma_signals['Low'] * 0.985,
-                mode='markers', name='突破20MA', marker=dict(symbol='triangle-up', size=9, color='#E60000')
+                mode='markers', name='突破20MA',
+                marker=dict(symbol='triangle-up', size=8, color='#FF334B')
             ), row=1, col=1)
 
-        kd_signals = plot_df[plot_df['Signal_KD']]
-        if not kd_signals.empty:
-            fig.add_trace(go.Scatter(
-                x=kd_signals.index, y=kd_signals['Low'] * 0.97,
-                mode='markers', name='KD金叉', marker=dict(symbol='triangle-up', size=8, color='#0066FF')
-            ), row=1, col=1)
+        # 第二層：成交量 (紅漲綠跌長條圖) + 量均線
+        vol_colors = ['#FF334B' if c >= o else '#00C853' for c, o in zip(df['Close'], df['Open'])]
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Volume'] / 1000,
+            marker_color=vol_colors, name="成交量(張)", showlegend=False
+        ), row=2, col=1)
 
-        # 4. 副圖：KD 指標
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['K'], mode='lines', name='K值', line=dict(color='#E60000', width=1.3)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['D'], mode='lines', name='D值', line=dict(color='#0066FF', width=1.3)), row=2, col=1)
-        fig.add_hline(y=80, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
-        fig.add_hline(y=20, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Vol_MA5'] / 1000,
+            mode='lines', name='5日均量', line=dict(color='#EAB308', width=1.1)
+        ), row=2, col=1)
 
-        # 預設顯示最近 6 個月，避免開啟時一次塞入 5 年全部 K 棒影響順暢度
-        last_date = plot_df.index[-1]
-        default_start_date = last_date - timedelta(days=180)
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Vol_MA20'] / 1000,
+            mode='lines', name='20日均量', line=dict(color='#A855F7', width=1.1)
+        ), row=2, col=1)
 
-        # 5. 手機縮放順暢度大優化：時間按鈕與 Range Selector
+        # 第三層：KD 指標
+        fig.add_trace(go.Scatter(x=df.index, y=df['K'], mode='lines', name='K(9)', line=dict(color='#FF334B', width=1.2)), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['D'], mode='lines', name='D(9)', line=dict(color='#38BDF8', width=1.2)), row=3, col=1)
+        fig.add_hline(y=80, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
+        fig.add_hline(y=20, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
+
+        # 預設顯示近 6 個月，可切換 5 年
+        last_d = df.index[-1]
+        start_d = last_d - timedelta(days=160)
+
         fig.update_xaxes(
             type="date",
-            range=[default_start_date, last_date],
-            rangeslider=dict(visible=True, thickness=0.06), # 輕量化底部滑動條
+            range=[start_d, last_d],
+            rangeslider=dict(visible=False),
             rangeselector=dict(
                 buttons=list([
                     dict(count=1, label="1月", step="month", stepmode="backward"),
@@ -373,21 +446,30 @@ def plot_stock_chart(ticker, title_name):
                     dict(count=5, label="5年", step="year", stepmode="backward"),
                     dict(step="all", label="全部")
                 ]),
-                font=dict(size=11),
-                yanchor="top",
-                y=1.13,
-                xanchor="left",
-                x=0
+                bgcolor="#1E293B",
+                activecolor="#3B82F6",
+                font=dict(color="#F1F5F9", size=11),
+                yanchor="top", y=1.12, xanchor="left", x=0
             ),
-            rangebreaks=[dict(bounds=["sat", "mon"])] # 自動消除週六日無效空白
+            rangebreaks=[dict(bounds=["sat", "mon"])],
+            gridcolor="#1e2638", zerolinecolor="#1e2638"
         )
 
+        fig.update_yaxes(gridcolor="#1e2638", zerolinecolor="#1e2638")
+
         fig.update_layout(
-            height=660,
-            margin=dict(l=10, r=10, t=55, b=10),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
+            height=720,
+            paper_bgcolor="#0A0E17",
+            plot_bgcolor="#0A0E17",
+            font=dict(color="#94A3B8"),
+            margin=dict(l=10, r=10, t=45, b=10),
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
+                font=dict(size=10, color="#CBD5E1")
+            ),
             hovermode="x unified"
         )
+
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"線圖載入失敗: {e}")
@@ -446,14 +528,13 @@ with tab1:
         selected_display = st.multiselect("搜尋股票 (支援中文或代碼)", options=all_stocks_df["display"].tolist(), default=all_stocks_df["display"].head(5).tolist())
         target_tickers = all_stocks_df[all_stocks_df["display"].isin(selected_display)]["ticker"].tolist()
 
-    # 1. 原本的篩選篩選條件改為「篩選條件」
+    # 篩選條件
     st.subheader("2️⃣ 篩選條件")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown("**【均線突破】**")
         chk_ma20 = st.checkbox("近3日突破 20 日線 (月線)", value=True)
         chk_ma60 = st.checkbox("近3日突破 60 日線 (季線)")
-        # 2. 近3週突破30週均線改為近1週
         chk_wma30 = st.checkbox("近1週突破 30 週均線")
     with col2:
         st.markdown("**【KD / RSI 指標】**")
@@ -496,7 +577,6 @@ with tab1:
                 try:
                     code = ticker.split(".")[0]
                     stock = yf.Ticker(ticker)
-                    # 抓取 5 年資料確保 240MA 年線與週均線數據充足
                     daily_df = stock.history(period="5y")
                     if len(daily_df) < 65:
                         continue
@@ -535,10 +615,9 @@ with tab1:
 
                     pass_filter = True
 
-                    # 1. 均線突破 (含近1週突破 30 週線)
+                    # 1. 均線突破
                     if chk_ma20 and not recent3_daily['Signal_MA20'].any(): pass_filter = False
                     if chk_ma60 and not recent3_daily['Signal_MA60'].any(): pass_filter = False
-                    # 近 1 週突破判定
                     if chk_wma30 and not w_today['Signal_WMA30']: pass_filter = False
 
                     # 2. 技術指標
