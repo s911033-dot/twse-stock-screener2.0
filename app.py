@@ -122,7 +122,6 @@ def fetch_multi_day_margin_and_sbl(dates):
     records = []
     for d in dates:
         day_dict = {}
-        # 融資融券
         url_margin = f"https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?date={d}&selectType=ALL&response=json"
         try:
             res = requests.get(url_margin, headers=HEADERS, timeout=8).json()
@@ -158,7 +157,6 @@ def fetch_multi_day_margin_and_sbl(dates):
         except Exception:
             pass
 
-        # 借券賣出
         url_sbl = f"https://www.twse.com.tw/rwd/zh/marginTrading/TWT93U?date={d}&response=json"
         try:
             res_sbl = requests.get(url_sbl, headers=HEADERS, timeout=8).json()
@@ -196,17 +194,11 @@ latest_margin_df = df_margin_all[df_margin_all["date"] == latest_date] if not df
 margin_data = {r["code"]: r.to_dict() for _, r in latest_margin_df.iterrows()} if not latest_margin_df.empty else {}
 
 # ====================================================
-# 5. 券商分點籌碼集中度計算 (FinMind 公開 API，快取 12 小時)
+# 5. 券商分點集中度計算 (FinMind 公開 API，快取 12 小時)
 # ====================================================
 @st.cache_data(ttl=43200)
 def fetch_broker_concentration(stock_code, days=10):
-    """
-    抓取特定個股在近 N 個交易日內所有券商分點買賣明細，
-    計算籌碼集中度 (%) = (前15大買超張數 - 前15大賣超張數) / 總成交量 * 100
-    並回傳前 3 大買超主力分點名稱。
-    """
     end_d = datetime.now()
-    # 考量假日，往前抓取足夠天數
     start_d = end_d - timedelta(days=int(days * 1.8))
     
     url = "https://api.finmindtrade.com/api/v4/data"
@@ -221,23 +213,18 @@ def fetch_broker_concentration(stock_code, days=10):
         res = requests.get(url, params=params, headers=HEADERS, timeout=8).json()
         if res.get("msg") == "success" and "data" in res and len(res["data"]) > 0:
             df_bs = pd.DataFrame(res["data"])
-            # 只取最近 N 個交易日
             unique_dates = sorted(df_bs["date"].unique(), reverse=True)[:days]
             df_recent = df_bs[df_bs["date"].isin(unique_dates)].copy()
 
-            # 計算各券商分點在該天期內的買賣超張數
-            df_recent["diff"] = (df_recent["buy"] - df_recent["sell"]) // 1000  # 轉為張
+            df_recent["diff"] = (df_recent["buy"] - df_recent["sell"]) // 1000
             broker_summary = df_recent.groupby("broker_name")["diff"].sum().reset_index()
 
-            # 前 15 大買超券商合計
             top_buyers = broker_summary.sort_values(by="diff", ascending=False).head(15)
             buy_sum = top_buyers[top_buyers["diff"] > 0]["diff"].sum()
 
-            # 前 15 大賣超券商合計 (轉正數方便相減)
             top_sellers = broker_summary.sort_values(by="diff", ascending=True).head(15)
             sell_sum = abs(top_sellers[top_sellers["diff"] < 0]["diff"].sum())
 
-            # 該期間個股總成交張數
             total_vol = (df_recent["buy"].sum() + df_recent["sell"].sum()) // 2000
 
             if total_vol > 0:
@@ -245,7 +232,6 @@ def fetch_broker_concentration(stock_code, days=10):
             else:
                 concentration = 0.0
 
-            # 抓出前 3 大吃貨主力券商名單
             top3_names = []
             for _, r in top_buyers.head(3).iterrows():
                 if r["diff"] > 0:
@@ -284,8 +270,13 @@ def compute_kd(df, n=9):
     return df
 
 def compute_indicators(df):
+    # 新增 5MA, 10MA, 240MA
+    df['MA5'] = df['Close'].rolling(5).mean()
+    df['MA10'] = df['Close'].rolling(10).mean()
     df['MA20'] = df['Close'].rolling(20).mean()
     df['MA60'] = df['Close'].rolling(60).mean()
+    df['MA240'] = df['Close'].rolling(240).mean()
+
     df['Vol_MA5'] = df['Volume'].rolling(5).mean()
     df['RSI_6'] = compute_rsi(df['Close'], 6)
     df['RSI_12'] = compute_rsi(df['Close'], 12)
@@ -306,64 +297,97 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 7. Plotly 互動式走勢圖
+# 7. Plotly 互動式走勢圖 (5年走勢 + 5/10/20/60/240均線 + 順暢縮放)
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period="6mo")
+        # 擴大至 5 年走勢
+        df = stock.history(period="5y")
         if len(df) < 30:
             st.warning("歷史數據不足以繪圖。")
             return
 
         df = compute_indicators(df)
-        plot_df = df.tail(80).copy()
+        plot_df = df.copy()
 
         fig = make_subplots(
             rows=2, cols=1,
             shared_xaxes=True,
-            vertical_spacing=0.05,
-            row_heights=[0.7, 0.3],
-            subplot_titles=(f"{title_name} 近日走勢與買進訊號", "KD (9, 3, 3)")
+            vertical_spacing=0.04,
+            row_heights=[0.72, 0.28],
+            subplot_titles=(f"{title_name} 5年走勢圖 (含 5/10/20/60/240MA)", "KD (9, 3, 3)")
         )
 
+        # 1. 主圖：K 線 (紅漲綠跌)
         fig.add_trace(go.Candlestick(
-            x=plot_df.index.strftime('%Y-%m-%d'),
+            x=plot_df.index,
             open=plot_df['Open'], high=plot_df['High'],
             low=plot_df['Low'], close=plot_df['Close'],
             name="K線", increasing_line_color='#FF4B4B', decreasing_line_color='#00873E'
         ), row=1, col=1)
 
-        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA20'], mode='lines', name='20MA', line=dict(color='#FFA500', width=1.5)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['MA60'], mode='lines', name='60MA', line=dict(color='#8A2BE2', width=1.5)), row=1, col=1)
+        # 2. 均線配置：5MA, 10MA, 20MA, 60MA, 240MA
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA5'], mode='lines', name='5MA (週線)', line=dict(color='#1E90FF', width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA10'], mode='lines', name='10MA (雙週)', line=dict(color='#9370DB', width=1.2)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA20'], mode='lines', name='20MA (月線)', line=dict(color='#FFA500', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA60'], mode='lines', name='60MA (季線)', line=dict(color='#20B2AA', width=1.5)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['MA240'], mode='lines', name='240MA (年線)', line=dict(color='#DC143C', width=1.8)), row=1, col=1)
 
+        # 3. 買進訊號標註
         ma_signals = plot_df[plot_df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
-                x=ma_signals.index.strftime('%Y-%m-%d'), y=ma_signals['Low'] * 0.985,
-                mode='markers', name='突破20MA', marker=dict(symbol='triangle-up', size=11, color='#E60000')
+                x=ma_signals.index, y=ma_signals['Low'] * 0.985,
+                mode='markers', name='突破20MA', marker=dict(symbol='triangle-up', size=9, color='#E60000')
             ), row=1, col=1)
 
         kd_signals = plot_df[plot_df['Signal_KD']]
         if not kd_signals.empty:
             fig.add_trace(go.Scatter(
-                x=kd_signals.index.strftime('%Y-%m-%d'), y=kd_signals['Low'] * 0.97,
-                mode='markers', name='KD金叉', marker=dict(symbol='triangle-up', size=9, color='#0066FF')
+                x=kd_signals.index, y=kd_signals['Low'] * 0.97,
+                mode='markers', name='KD金叉', marker=dict(symbol='triangle-up', size=8, color='#0066FF')
             ), row=1, col=1)
 
-        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['K'], mode='lines', name='K值', line=dict(color='#E60000', width=1.5)), row=2, col=1)
-        fig.add_trace(go.Scatter(x=plot_df.index.strftime('%Y-%m-%d'), y=plot_df['D'], mode='lines', name='D值', line=dict(color='#0066FF', width=1.5)), row=2, col=1)
+        # 4. 副圖：KD 指標
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['K'], mode='lines', name='K值', line=dict(color='#E60000', width=1.3)), row=2, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['D'], mode='lines', name='D值', line=dict(color='#0066FF', width=1.3)), row=2, col=1)
         fig.add_hline(y=80, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
         fig.add_hline(y=20, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
 
+        # 預設顯示最近 6 個月，避免開啟時一次塞入 5 年全部 K 棒影響順暢度
+        last_date = plot_df.index[-1]
+        default_start_date = last_date - timedelta(days=180)
+
+        # 5. 手機縮放順暢度大優化：時間按鈕與 Range Selector
+        fig.update_xaxes(
+            type="date",
+            range=[default_start_date, last_date],
+            rangeslider=dict(visible=True, thickness=0.06), # 輕量化底部滑動條
+            rangeselector=dict(
+                buttons=list([
+                    dict(count=1, label="1月", step="month", stepmode="backward"),
+                    dict(count=3, label="3月", step="month", stepmode="backward"),
+                    dict(count=6, label="半年", step="month", stepmode="backward"),
+                    dict(count=1, label="1年", step="year", stepmode="backward"),
+                    dict(count=5, label="5年", step="year", stepmode="backward"),
+                    dict(step="all", label="全部")
+                ]),
+                font=dict(size=11),
+                yanchor="top",
+                y=1.13,
+                xanchor="left",
+                x=0
+            ),
+            rangebreaks=[dict(bounds=["sat", "mon"])] # 自動消除週六日無效空白
+        )
+
         fig.update_layout(
-            height=600,
-            margin=dict(l=10, r=10, t=35, b=10),
-            xaxis_rangeslider_visible=False,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=660,
+            margin=dict(l=10, r=10, t=55, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1),
             hovermode="x unified"
         )
-        fig.update_xaxes(type='category')
         st.plotly_chart(fig, use_container_width=True)
     except Exception as e:
         st.error(f"線圖載入失敗: {e}")
@@ -402,7 +426,7 @@ with tab1:
         import_mode = st.radio("匯入模式", ["文字直接貼上 (推薦)", "上傳 CSV / 檔案"], horizontal=True)
         raw_codes = []
         if import_mode == "文字直接貼上 (推薦)":
-            txt = st.text_area("請直接貼上元大 App 複製的文字或股票清單 (含中文字、符號自動精準解析)：", height=80, placeholder="例如：2330 台積電 2317 鴻海 (2454聯發科)")
+            txt = st.text_area("請直接貼上元大 App 複製的文字或股票清單：", height=80, placeholder="例如：2330 台積電 2317 鴻海 (2454聯發科)")
             if txt:
                 raw_codes = re.findall(r'\b\d{4}\b', txt)
         else:
@@ -422,13 +446,15 @@ with tab1:
         selected_display = st.multiselect("搜尋股票 (支援中文或代碼)", options=all_stocks_df["display"].tolist(), default=all_stocks_df["display"].head(5).tolist())
         target_tickers = all_stocks_df[all_stocks_df["display"].isin(selected_display)]["ticker"].tolist()
 
-    st.subheader("2️⃣ 勾選篩選條件")
+    # 1. 原本的篩選篩選條件改為「篩選條件」
+    st.subheader("2️⃣ 篩選條件")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown("**【均線突破】**")
         chk_ma20 = st.checkbox("近3日突破 20 日線 (月線)", value=True)
         chk_ma60 = st.checkbox("近3日突破 60 日線 (季線)")
-        chk_wma30 = st.checkbox("近3週突破 30 週均線")
+        # 2. 近3週突破30週均線改為近1週
+        chk_wma30 = st.checkbox("近1週突破 30 週均線")
     with col2:
         st.markdown("**【KD / RSI 指標】**")
         chk_daily_kd = st.checkbox("近3日 KD 黃金交叉", value=True)
@@ -470,7 +496,8 @@ with tab1:
                 try:
                     code = ticker.split(".")[0]
                     stock = yf.Ticker(ticker)
-                    daily_df = stock.history(period="2y")
+                    # 抓取 5 年資料確保 240MA 年線與週均線數據充足
+                    daily_df = stock.history(period="5y")
                     if len(daily_df) < 65:
                         continue
 
@@ -505,27 +532,28 @@ with tab1:
                     today_vol_lots = d_today['Volume'] / 1000
 
                     recent3_daily = daily_df.tail(3)
-                    recent3_weekly = weekly_df.tail(3)
 
                     pass_filter = True
 
-                    # 1. 均線與技術面檢查
+                    # 1. 均線突破 (含近1週突破 30 週線)
                     if chk_ma20 and not recent3_daily['Signal_MA20'].any(): pass_filter = False
                     if chk_ma60 and not recent3_daily['Signal_MA60'].any(): pass_filter = False
-                    if chk_wma30 and not recent3_weekly['Signal_WMA30'].any(): pass_filter = False
+                    # 近 1 週突破判定
+                    if chk_wma30 and not w_today['Signal_WMA30']: pass_filter = False
 
+                    # 2. 技術指標
                     if chk_daily_kd and not recent3_daily['Signal_KD'].any(): pass_filter = False
                     if chk_daily_rsi and not recent3_daily['Signal_RSI'].any(): pass_filter = False
                     if chk_weekly_kd and not w_today['Signal_W_KD']: pass_filter = False
                     if chk_weekly_rsi and not w_today['Signal_W_RSI']: pass_filter = False
 
-                    # 2. 量能與法人檢查
+                    # 3. 量能與法人
                     if today_vol_lots < min_vol_limit: pass_filter = False
                     if chk_vol_burst and (d_today['Volume'] < (d_prev['Vol_MA5'] * vol_multiple)): pass_filter = False
                     if chk_trust_buy and inst_info["trust"] < min_trust_lots: pass_filter = False
                     if chk_foreign_buy and inst_info["foreign"] < min_foreign_lots: pass_filter = False
 
-                    # 3. 券商分點集中度檢查 (核心新增)
+                    # 4. 券商分點集中度
                     conc_10_val, brokers_10_str = None, "-"
                     conc_20_val, brokers_20_str = None, "-"
 
