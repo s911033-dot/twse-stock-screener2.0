@@ -297,7 +297,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 7. 券商專業看盤版面 (仿投資先生深黑 UI + 布林通道 + 5/10/20/60/240均線)
+# 7. 券商專業看盤版面 (長型均線指示條 + 取消手動框選 + 手勢滑動縮放)
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -314,7 +314,7 @@ def plot_stock_chart(ticker, title_name):
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
 
-        # 取得最新行情數據
+        # 最新盤價數據
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         close_price = latest['Close']
@@ -325,10 +325,10 @@ def plot_stock_chart(ticker, title_name):
         theme_color = "#FF334B" if price_diff >= 0 else "#00C853"
         arrow = "▲" if price_diff >= 0 else "▼"
 
-        # 頂部即時報價卡
+        # 1. 頂部即時報價卡
         st.markdown(
             f"""
-            <div style="background-color: #121826; padding: 12px 18px; border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1f293d;">
+            <div style="background-color: #121826; padding: 12px 18px; border-radius: 8px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1f293d;">
                 <div>
                     <span style="font-size: 22px; font-weight: bold; color: #FFFFFF;">{title_name}</span>
                     <span style="color: #94A3B8; font-size: 13px; margin-left: 8px;">市 {ticker.split('.')[0]}</span>
@@ -342,10 +342,10 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
-        # 開高低收狀態條
+        # 2. 開高低收狀態條
         st.markdown(
             f"""
-            <div style="background-color: #0d111a; padding: 6px 12px; border-radius: 4px; font-size: 12px; color: #CBD5E1; display: flex; justify-content: space-between; margin-bottom: 4px; border: 1px solid #161f30;">
+            <div style="background-color: #0d111a; padding: 6px 12px; border-radius: 4px; font-size: 12px; color: #CBD5E1; display: flex; justify-content: space-between; margin-bottom: 6px; border: 1px solid #161f30;">
                 <span>開: <b style="color:#FFF;">{latest['Open']:.2f}</b></span>
                 <span>高: <b style="color:#FF334B;">{latest['High']:.2f}</b></span>
                 <span>低: <b style="color:#00C853;">{latest['Low']:.2f}</b></span>
@@ -356,28 +356,45 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
+        # 3. 獨立長型均線數據指示條 (徹底解決與時間選項重疊)
+        def fmt_val(v):
+            return f"{v:.2f}" if pd.notna(v) else "-"
+
+        st.markdown(
+            f"""
+            <div style="background-color: #0b101b; padding: 6px 10px; border-radius: 4px; font-size: 11px; display: flex; flex-wrap: wrap; gap: 10px; border: 1px solid #1a2234; margin-bottom: 6px;">
+                <span style="color: #EAB308;">■ 5MA: {fmt_val(latest.get('MA5'))}</span>
+                <span style="color: #A855F7;">■ 10MA: {fmt_val(latest.get('MA10'))}</span>
+                <span style="color: #38BDF8;">■ 20MA: {fmt_val(latest.get('MA20'))}</span>
+                <span style="color: #F97316;">■ 60MA: {fmt_val(latest.get('MA60'))}</span>
+                <span style="color: #EC4899;">■ 240MA: {fmt_val(latest.get('MA240'))}</span>
+                <span style="color: #64748B;">■ 布林: [{fmt_val(latest.get('BB_Lower'))} ~ {fmt_val(latest.get('BB_Upper'))}]</span>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
         # 建立三層子圖
         fig = make_subplots(
             rows=3, cols=1,
             shared_xaxes=True,
             vertical_spacing=0.03,
-            row_heights=[0.58, 0.22, 0.20]
+            row_heights=[0.60, 0.21, 0.19]
         )
 
         # 1. 布林通道下軌
         fig.add_trace(go.Scatter(
             x=df.index, y=df['BB_Lower'],
-            line=dict(color='rgba(59, 130, 246, 0.4)', width=1),
-            name='布林下軌', showlegend=False
+            line=dict(color='rgba(59, 130, 246, 0.35)', width=1),
+            hoverinfo='skip', showlegend=False
         ), row=1, col=1)
 
         # 2. 布林通道上軌 (半透明陰影)
         fig.add_trace(go.Scatter(
             x=df.index, y=df['BB_Upper'],
-            line=dict(color='rgba(59, 130, 246, 0.4)', width=1),
-            fill='tonexty',
-            fillcolor='rgba(59, 130, 246, 0.08)',
-            name='布林通道', showlegend=False
+            line=dict(color='rgba(59, 130, 246, 0.35)', width=1),
+            fill='tonexty', fillcolor='rgba(59, 130, 246, 0.08)',
+            hoverinfo='skip', showlegend=False
         ), row=1, col=1)
 
         # 3. K 線
@@ -387,26 +404,28 @@ def plot_stock_chart(ticker, title_name):
             low=df['Low'], close=df['Close'],
             name="K線",
             increasing_line_color='#FF334B', increasing_fillcolor='#FF334B',
-            decreasing_line_color='#00C853', decreasing_fillcolor='#00C853'
+            decreasing_line_color='#00C853', decreasing_fillcolor='#00C853',
+            showlegend=False
         ), row=1, col=1)
 
-        # 4. 均線群
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', name='5MA', line=dict(color='#EAB308', width=1.1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10MA', line=dict(color='#A855F7', width=1.1)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='20MA', line=dict(color='#38BDF8', width=1.3)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', name='60MA', line=dict(color='#F97316', width=1.3)), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['MA240'], mode='lines', name='240MA', line=dict(color='#EC4899', width=1.5)), row=1, col=1)
+        # 4. 均線群 (已獨立於上方指示條呈現，此處設為不顯示原生 Legend)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', name='5MA', line=dict(color='#EAB308', width=1.1), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10MA', line=dict(color='#A855F7', width=1.1), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='20MA', line=dict(color='#38BDF8', width=1.3), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', name='60MA', line=dict(color='#F97316', width=1.3), showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['MA240'], mode='lines', name='240MA', line=dict(color='#EC4899', width=1.5), showlegend=False), row=1, col=1)
 
-        # 5. 買進訊號標註
+        # 5. 買進訊號標記 (三角形)
         ma_signals = df[df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
                 x=ma_signals.index, y=ma_signals['Low'] * 0.985,
                 mode='markers', name='突破20MA',
-                marker=dict(symbol='triangle-up', size=8, color='#FF334B')
+                marker=dict(symbol='triangle-up', size=8, color='#FF334B'),
+                showlegend=False
             ), row=1, col=1)
 
-        # 第二層：成交量 (紅漲綠跌長條圖) + 量均線
+        # 第二層：成交量柱 + 均量線
         vol_colors = ['#FF334B' if c >= o else '#00C853' for c, o in zip(df['Close'], df['Open'])]
         fig.add_trace(go.Bar(
             x=df.index, y=df['Volume'] / 1000,
@@ -415,27 +434,29 @@ def plot_stock_chart(ticker, title_name):
 
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Vol_MA5'] / 1000,
-            mode='lines', name='5日均量', line=dict(color='#EAB308', width=1.1)
+            mode='lines', name='5日均量', line=dict(color='#EAB308', width=1.1), showlegend=False
         ), row=2, col=1)
 
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Vol_MA20'] / 1000,
-            mode='lines', name='20日均量', line=dict(color='#A855F7', width=1.1)
+            mode='lines', name='20日均量', line=dict(color='#A855F7', width=1.1), showlegend=False
         ), row=2, col=1)
 
         # 第三層：KD 指標
-        fig.add_trace(go.Scatter(x=df.index, y=df['K'], mode='lines', name='K(9)', line=dict(color='#FF334B', width=1.2)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['D'], mode='lines', name='D(9)', line=dict(color='#38BDF8', width=1.2)), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['K'], mode='lines', name='K(9)', line=dict(color='#FF334B', width=1.2), showlegend=False), row=3, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['D'], mode='lines', name='D(9)', line=dict(color='#38BDF8', width=1.2), showlegend=False), row=3, col=1)
         fig.add_hline(y=80, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
         fig.add_hline(y=20, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
 
-        # 預設顯示近 6 個月，可切換 5 年
+        # 預設顯示近 5 個月
         last_d = df.index[-1]
-        start_d = last_d - timedelta(days=160)
+        start_d = last_d - timedelta(days=150)
 
+        # X 軸配置：取消手動框選時間段，時間選項乾淨置頂
         fig.update_xaxes(
             type="date",
             range=[start_d, last_d],
+            fixedrange=False,
             rangeslider=dict(visible=False),
             rangeselector=dict(
                 buttons=list([
@@ -446,31 +467,40 @@ def plot_stock_chart(ticker, title_name):
                     dict(count=5, label="5年", step="year", stepmode="backward"),
                     dict(step="all", label="全部")
                 ]),
-                bgcolor="#1E293B",
-                activecolor="#3B82F6",
+                bgcolor="#161F30",
+                activecolor="#2563EB",
                 font=dict(color="#F1F5F9", size=11),
-                yanchor="top", y=1.12, xanchor="left", x=0
+                yanchor="bottom",
+                y=1.02, # 向上推開，獨立於圖表之外，不再被遮擋
+                xanchor="left",
+                x=0
             ),
             rangebreaks=[dict(bounds=["sat", "mon"])],
             gridcolor="#1e2638", zerolinecolor="#1e2638"
         )
 
-        fig.update_yaxes(gridcolor="#1e2638", zerolinecolor="#1e2638")
+        fig.update_yaxes(gridcolor="#1e2638", zerolinecolor="#1e2638", fixedrange=False)
 
+        # 互動模式優化：dragmode='pan' 實現手指左右滑動平移
         fig.update_layout(
-            height=720,
+            height=700,
+            dragmode="pan", # 手指左右拖曳為平移移動，不變更大小
+            showlegend=False, # 關閉內嵌圖例
             paper_bgcolor="#0A0E17",
             plot_bgcolor="#0A0E17",
             font=dict(color="#94A3B8"),
-            margin=dict(l=10, r=10, t=45, b=10),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.01, xanchor="right", x=1,
-                font=dict(size=10, color="#CBD5E1")
-            ),
+            margin=dict(l=10, r=10, t=40, b=10),
             hovermode="x unified"
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        # 啟用滾動/拉動縮放，並徹底隱藏右上方遮擋的工具列
+        config = {
+            "scrollZoom": True,            # 手指往上拉/往下拉支援縮放放大縮小
+            "displayModeBar": False,       # 關閉相機、十字、Zoom按鈕列，介面乾淨不重疊
+            "doubleClick": "reset"         # 點兩下立即還原預設範圍
+        }
+
+        st.plotly_chart(fig, use_container_width=True, config=config)
     except Exception as e:
         st.error(f"線圖載入失敗: {e}")
 
@@ -844,3 +874,4 @@ with tab3:
                 plot_stock_chart(f"{chosen}.TW", code_opts[chosen])
         else:
             st.warning(f"在 {period_label} 的統計期間內，暫無符合該條件的標的。")
+
