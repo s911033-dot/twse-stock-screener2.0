@@ -297,7 +297,7 @@ def compute_indicators(df):
     return df
 
 # ====================================================
-# 7. 券商專業看盤版面 (刪除Y軸負數 + 右下角快捷游標列 + 起算日標記)
+# 7. 券商專業看盤版面 (刪除Y軸負數 + 游標控制列 + 均線起算日標記)
 # ====================================================
 def plot_stock_chart(ticker, title_name):
     try:
@@ -309,12 +309,10 @@ def plot_stock_chart(ticker, title_name):
 
         df = compute_indicators(df)
 
-        # 計算布林通道 (20MA, 2倍標準差)
         df['STD20'] = df['Close'].rolling(20).std()
         df['BB_Upper'] = df['MA20'] + (df['STD20'] * 2)
         df['BB_Lower'] = df['MA20'] - (df['STD20'] * 2)
 
-        # 最新盤價數據
         latest = df.iloc[-1]
         prev = df.iloc[-2]
         close_price = latest['Close']
@@ -325,7 +323,6 @@ def plot_stock_chart(ticker, title_name):
         theme_color = "#FF334B" if price_diff >= 0 else "#00C853"
         arrow = "▲" if price_diff >= 0 else "▼"
 
-        # 1. 頂部即時報價卡
         st.markdown(
             f"""
             <div style="background-color: #121826; padding: 12px 18px; border-radius: 8px; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; border: 1px solid #1f293d;">
@@ -342,7 +339,6 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
-        # 2. 開高低收狀態條
         st.markdown(
             f"""
             <div style="background-color: #0d111a; padding: 6px 12px; border-radius: 4px; font-size: 12px; color: #CBD5E1; display: flex; justify-content: space-between; margin-bottom: 6px; border: 1px solid #161f30;">
@@ -356,7 +352,6 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
-        # 3. 獨立長型均線數據指示條 (避免與時間按鈕重疊)
         def fmt_val(v):
             return f"{v:.2f}" if pd.notna(v) else "-"
 
@@ -374,7 +369,6 @@ def plot_stock_chart(ticker, title_name):
             unsafe_allow_html=True
         )
 
-        # 建立三層子圖
         fig = make_subplots(
             rows=3, cols=1,
             shared_xaxes=True,
@@ -382,40 +376,24 @@ def plot_stock_chart(ticker, title_name):
             row_heights=[0.60, 0.21, 0.19]
         )
 
-        # 1. 布林通道下軌
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['BB_Lower'],
-            line=dict(color='rgba(59, 130, 246, 0.35)', width=1),
-            hoverinfo='skip', showlegend=False
-        ), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], line=dict(color='rgba(59, 130, 246, 0.35)', width=1), hoverinfo='skip', showlegend=False), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], line=dict(color='rgba(59, 130, 246, 0.35)', width=1), fill='tonexty', fillcolor='rgba(59, 130, 246, 0.08)', hoverinfo='skip', showlegend=False), row=1, col=1)
 
-        # 2. 布林通道上軌 (半透明陰影)
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['BB_Upper'],
-            line=dict(color='rgba(59, 130, 246, 0.35)', width=1),
-            fill='tonexty', fillcolor='rgba(59, 130, 246, 0.08)',
-            hoverinfo='skip', showlegend=False
-        ), row=1, col=1)
-
-        # 3. K 線
         fig.add_trace(go.Candlestick(
             x=df.index,
-            open=df['Open'], high=df['High'],
-            low=df['Low'], close=df['Close'],
+            open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
             name="K線",
             increasing_line_color='#FF334B', increasing_fillcolor='#FF334B',
             decreasing_line_color='#00C853', decreasing_fillcolor='#00C853',
             showlegend=False
         ), row=1, col=1)
 
-        # 4. 均線群 (以獨立長條呈現，關閉原生 Legend)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA5'], mode='lines', name='5MA', line=dict(color='#EAB308', width=1.1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA10'], mode='lines', name='10MA', line=dict(color='#A855F7', width=1.1), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA20'], mode='lines', name='20MA', line=dict(color='#38BDF8', width=1.3), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA60'], mode='lines', name='60MA', line=dict(color='#F97316', width=1.3), showlegend=False), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MA240'], mode='lines', name='240MA', line=dict(color='#EC4899', width=1.5), showlegend=False), row=1, col=1)
 
-        # 5. 買進訊號標記 (三角形)
         ma_signals = df[df['Signal_MA20']]
         if not ma_signals.empty:
             fig.add_trace(go.Scatter(
@@ -425,64 +403,45 @@ def plot_stock_chart(ticker, title_name):
                 showlegend=False
             ), row=1, col=1)
 
-        # 第二層：成交量柱 + 均量線
         vol_colors = ['#FF334B' if c >= o else '#00C853' for c, o in zip(df['Close'], df['Open'])]
-        fig.add_trace(go.Bar(
-            x=df.index, y=df['Volume'] / 1000,
-            marker_color=vol_colors, name="成交量(張)", showlegend=False
-        ), row=2, col=1)
+        fig.add_trace(go.Bar(x=df.index, y=df['Volume'] / 1000, marker_color=vol_colors, name="成交量(張)", showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Vol_MA5'] / 1000, mode='lines', name='5日均量', line=dict(color='#EAB308', width=1.1), showlegend=False), row=2, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['Vol_MA20'] / 1000, mode='lines', name='20日均量', line=dict(color='#A855F7', width=1.1), showlegend=False), row=2, col=1)
 
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['Vol_MA5'] / 1000,
-            mode='lines', name='5日均量', line=dict(color='#EAB308', width=1.1), showlegend=False
-        ), row=2, col=1)
-
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['Vol_MA20'] / 1000,
-            mode='lines', name='20日均量', line=dict(color='#A855F7', width=1.1), showlegend=False
-        ), row=2, col=1)
-
-        # 第三層：KD 指標
         fig.add_trace(go.Scatter(x=df.index, y=df['K'], mode='lines', name='K(9)', line=dict(color='#FF334B', width=1.2), showlegend=False), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['D'], mode='lines', name='D(9)', line=dict(color='#38BDF8', width=1.2), showlegend=False), row=3, col=1)
         fig.add_hline(y=80, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
         fig.add_hline(y=20, line_dash="dash", line_color="#475569", line_width=0.8, row=3, col=1)
 
-        # ----------------------------------------------------
-        # 標記 5日、10日、20日、60日、240日前起算日（彩色三角形標註於主圖底部）
-        # ----------------------------------------------------
-        n_days_map = [
-            (5, "#EAB308", "5日起算"),
-            (10, "#A855F7", "10日起算"),
-            (20, "#38BDF8", "20日起算"),
-            (60, "#F97316", "60日起算"),
-            (240, "#EC4899", "240日起算")
-        ]
-
-        min_price = df['Low'].min()
-        marker_y = min_price * 0.985 if min_price > 0 else 0
-
-        for n_day, color, label in n_days_map:
-            if len(df) >= n_day:
-                target_date = df.index[-n_day]
-                fig.add_trace(go.Scatter(
-                    x=[target_date], y=[marker_y],
-                    mode='markers+text',
-                    marker=dict(symbol='triangle-up', size=11, color=color),
-                    text=[f"{n_day}D"],
-                    textposition="bottom center",
-                    textfont=dict(size=9, color=color),
-                    name=label,
-                    hoverinfo='text',
-                    hovertext=f"{label}交易日: {target_date.strftime('%Y-%m-%d')}",
-                    showlegend=False
-                ), row=1, col=1)
-
-        # 預設時間範圍
         last_d = df.index[-1]
         start_d = last_d - timedelta(days=150)
 
-        # X 軸配置
+        # ----------------------------------------------------
+        # 標記均線起算日（貼在 X 軸底部，絕不佔用Y軸空間產生負數）
+        # ----------------------------------------------------
+        n_days_map = [
+            (5, "#EAB308", "▲<br>5D"),
+            (10, "#A855F7", "▲<br>10D"),
+            (20, "#38BDF8", "▲<br>20D"),
+            (60, "#F97316", "▲<br>60D"),
+            (240, "#EC4899", "▲<br>240D")
+        ]
+
+        chart_annotations = []
+        for n_day, color, text_lbl in n_days_map:
+            if len(df) >= n_day:
+                target_date = df.index[-n_day]
+                chart_annotations.append(dict(
+                    x=target_date,
+                    y=0.01,                 
+                    xref="x",
+                    yref="y domain",       # 比例座標，鎖死底部
+                    text=text_lbl,
+                    showarrow=False,
+                    font=dict(color=color, size=9),
+                    align="center"
+                ))
+
         fig.update_xaxes(
             type="date",
             range=[start_d, last_d],
@@ -509,19 +468,21 @@ def plot_stock_chart(ticker, title_name):
             gridcolor="#1e2638", zerolinecolor="#1e2638"
         )
 
-        # ----------------------------------------------------
-        # 刪除 Y 軸股價負數刻度 (rangemode='nonnegative')
-        # ----------------------------------------------------
+        # 強制 Y 軸不得為負數，並自動貼齊股價區間
         fig.update_yaxes(
-            rangemode='nonnegative', # 絕對不出現負數股價刻度
+            row=1, col=1,
+            autorange=True,
+            rangemode="tozero",
+            minallowed=0,           
             gridcolor="#1e2638",
             zerolinecolor="#1e2638",
             fixedrange=False
         )
 
-        # ----------------------------------------------------
-        # 於 K 線圖右下角內嵌縮放及左右選取游標圖示列 (仿參考圖)
-        # ----------------------------------------------------
+        fig.update_yaxes(row=2, col=1, minallowed=0, gridcolor="#1e2638", zerolinecolor="#1e2638", fixedrange=False)
+        fig.update_yaxes(row=3, col=1, minallowed=0, maxallowed=100, gridcolor="#1e2638", zerolinecolor="#1e2638", fixedrange=False)
+
+        # 內嵌快捷控制列
         controls_menu = [
             dict(
                 type="buttons",
@@ -535,36 +496,12 @@ def plot_stock_chart(ticker, title_name):
                 borderwidth=1,
                 pad=dict(r=3, t=2, b=2, l=3),
                 buttons=[
-                    dict(
-                        label="✕",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}]
-                    ),
-                    dict(
-                        label="＋",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=70), last_d]}]
-                    ),
-                    dict(
-                        label="－",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=365), last_d]}]
-                    ),
-                    dict(
-                        label="◀",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=220), last_d - timedelta(days=70)]}]
-                    ),
-                    dict(
-                        label="▶",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=110), last_d]}]
-                    ),
-                    dict(
-                        label="⏭",
-                        method="relayout",
-                        args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}]
-                    )
+                    dict(label="✕", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}]),
+                    dict(label="＋", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=70), last_d]}]),
+                    dict(label="－", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=365), last_d]}]),
+                    dict(label="◀", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=220), last_d - timedelta(days=70)]}]),
+                    dict(label="▶", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=110), last_d]}]),
+                    dict(label="⏭", method="relayout", args=[{"xaxis.range": [last_d - timedelta(days=150), last_d]}])
                 ]
             )
         ]
@@ -578,7 +515,8 @@ def plot_stock_chart(ticker, title_name):
             font=dict(color="#94A3B8"),
             margin=dict(l=10, r=10, t=40, b=10),
             hovermode="x unified",
-            updatemenus=controls_menu
+            updatemenus=controls_menu,
+            annotations=chart_annotations
         )
 
         config = {
@@ -594,7 +532,7 @@ def plot_stock_chart(ticker, title_name):
 # ====================================================
 # 8. 主介面分頁導航
 # ====================================================
-tab1, tab2, tab3 = st.tabs(["🚀 全方位技術量價 & 分點選股", "📊 法人與信用交易排行 Top 20", "⚔️ 主力籌碼對作模型"])
+tab1, tab2, tab3 = st.tabs(["🚀 全方位技術量價 & 分點選股", "📊 法人與信用排行", "⚔️ 主力對作與集中度模型"])
 
 # ----------------------------------------------------
 # TAB 1: 全方位技術量價 & 分點集中度選股
@@ -866,7 +804,7 @@ with tab2:
             st.dataframe(res_df, use_container_width=True)
 
 # ----------------------------------------------------
-# TAB 3: 主力籌碼對作模型 (支援每日、三日、五日累積)
+# TAB 3: 主力籌碼對作模型 & 券商集中度排行 (Bug 修復 & 新增排行)
 # ----------------------------------------------------
 with tab3:
     st.subheader("🎯 主力與散戶多空對作累計篩選 (前 20 名)")
@@ -891,7 +829,8 @@ with tab3:
             f"🚀 投信買超 + 融資減少 ({period_label} 投信認養/浮額洗清)",
             f"⚠️ 投信賣超 + 融資增加 ({period_label} 投信倒貨/散戶承接)",
             f"💎 外資買超 + 投信買超 ({period_label} 土洋齊買/合力抬轎)",
-            f"⚔️ 外資買超 + 投信賣超 ({period_label} 土洋對作/多空分歧)"
+            f"⚔️ 外資買超 + 投信賣超 ({period_label} 土洋對作/多空分歧)",
+            f"🌟 主力籌碼集中度 Top 20 ({period_label} 分點大戶吃貨排行榜)"
         ]
     )
 
@@ -899,9 +838,14 @@ with tab3:
     inst_agg = sub_inst.groupby(["code", "name"])[["foreign", "trust", "total_inst"]].sum().reset_index()
 
     sub_margin = df_margin_all[df_margin_all["date"].isin(active_dates)]
-    margin_agg = sub_margin.groupby("code")[["margin_diff", "sbl_diff", "sbl_short_sell"]].sum().reset_index()
+    if not sub_margin.empty:
+        margin_agg = sub_margin.groupby("code")[["margin_diff", "sbl_diff", "sbl_short_sell"]].sum().reset_index()
+    else:
+        margin_agg = pd.DataFrame(columns=["code", "margin_diff", "sbl_diff", "sbl_short_sell"])
 
-    pool_df = pd.merge(inst_agg, margin_agg, on="code", how="inner")
+    # 【Bug 修復】改為 left join 加上 fillna，當晚間信用交易(融資券)資料尚未公布時，也能正常篩選土洋齊買等籌碼條件
+    pool_df = pd.merge(inst_agg, margin_agg, on="code", how="left")
+    pool_df.fillna(0, inplace=True)
     
     col_foreign = f"{period_label}外資(張)"
     col_trust = f"{period_label}投信(張)"
@@ -946,6 +890,30 @@ with tab3:
         elif "外資買超 + 投信賣超" in model_choice:
             cond = (pool_df[col_foreign] > 0) & (pool_df[col_trust] < 0)
             out_df = pool_df[cond].sort_values(by=col_foreign, ascending=False).head(20)
+            
+        elif "主力籌碼集中度 Top 20" in model_choice:
+            st.info("🔄 正在運算主力分點大戶集中度... (為維持系統極速，自動篩選「法人買超最積極之前 50 名」進行深度集中度掃描解析)")
+            pool_df["雙法人合買"] = pool_df[col_foreign] + pool_df[col_trust]
+            top_candidates = pool_df[pool_df["雙法人合買"] > 0].sort_values(by="雙法人合買", ascending=False).head(50)
+            if top_candidates.empty:
+                top_candidates = pool_df.sort_values(by=col_foreign, ascending=False).head(50)
+                
+            results_list = []
+            pb = st.progress(0, text="掃描分點籌碼中...")
+            for idx, r in top_candidates.reset_index().iterrows():
+                pb.progress((idx + 1) / len(top_candidates), text=f"分析吃貨集中度: {r['名稱']}")
+                conc, brokers = fetch_broker_concentration(r['代碼'], days=period_days)
+                if conc is not None:
+                    row_data = r.to_dict()
+                    row_data["集中度(%)"] = conc
+                    row_data["主要吃貨券商"] = brokers
+                    results_list.append(row_data)
+            pb.empty()
+            
+            if results_list:
+                res_df = pd.DataFrame(results_list)
+                out_df = res_df.sort_values(by="集中度(%)", ascending=False).head(20)
+                out_df = out_df.drop(columns=["雙法人合買", "index"], errors="ignore")
 
         if not out_df.empty:
             out_df.reset_index(drop=True, inplace=True)
@@ -961,3 +929,4 @@ with tab3:
                 plot_stock_chart(f"{chosen}.TW", code_opts[chosen])
         else:
             st.warning(f"在 {period_label} 的統計期間內，暫無符合該條件的標的。")
+
